@@ -77,7 +77,6 @@ class Logger:
             os.makedirs(self.checkpoint_dir)
         with open(os.path.join(self.checkpoint_dir, "config.json"), "w") as f:
             config = dict(self.config)
-            config['seed'] = (str(np.array(self.config['seed'][0])), str(np.array(self.config['seed'][1])))
             json.dump(dict(config), f, indent=4)
         
     def log(self, 

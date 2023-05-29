@@ -4,18 +4,16 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from typing import Tuple, List, Iterator
+import time
 
 from augmentations import augment_batch
+from model_zoo_jax import load_nets, shuffle_data
 
 from meta_transformer import utils, preprocessing
 from meta_transformer.meta_model import create_meta_model
 from meta_transformer.meta_model import MetaModelConfig as ModelConfig
 
-from model_zoo_jax.zoo_dataloader import load_nets, shuffle_data
-
-from pretraining.loss import MWMLossMSE
-from pretraining.logger import Logger
-from pretraining.train import Updater
+from pretraining import MWMLossMSE, Updater, Logger
 
 import os
 import argparse
@@ -44,24 +42,30 @@ def filter_data(data: List[dict]):
           That's {100*(len(data) - len(f_data))/len(data):.2f}%.")
     return np.array(f_data)
 
-def mask_data(rng,inputs, mask_token, mask_prob=0.1):
+def mask_data(rng,inputs, mask_token=-100, mask_prob=0.2, individual_w=False):
     masked_inputs = []
     masked_positions = []
 
     for seq in inputs:
-        seq_len = seq.shape[0]
-        mask = jax.random.uniform(rng,(seq_len,1)) < mask_prob
+        if individual_w:
+            mask = jax.random.uniform(rng,seq.shape) < mask_prob
+        else:
+            seq_len = seq.shape[0]
+            mask = jax.random.uniform(rng,(seq_len,1)) < mask_prob
         masked_seq = jnp.copy(seq)
         masked_seq = masked_seq.at[jnp.where(mask)[0]].set(mask_token)
         masked_inputs.append(masked_seq)
+        
+        if not(individual_w):
+            mask = jnp.tile(mask, (1,seq.shape[1]))
         masked_positions.append(jnp.asarray(mask, dtype=jnp.int32))
 
     return jnp.array(masked_inputs), masked_positions
 
-def process_batch(rng, inputs, mask_token, mask_prob=0, chunk_size=100):
+def process_batch(rng, inputs, mask_token=None, mask_prob=0, chunk_size=100, mask_individual=False):
     inputs = [preprocessing.preprocess(inp, chunk_size)[0]
                   for inp in inputs]
-    masked_inputs, masked_positions = mask_data(rng,inputs, mask_token, mask_prob)
+    masked_inputs, masked_positions = mask_data(rng,inputs, mask_token, mask_prob,individual_w=mask_individual)
     return masked_inputs, jnp.stack(inputs), masked_positions
 
 def data_iterator(masked_inputs:jnp.ndarray, inputs: jnp.ndarray, positions:jnp.ndarray,
@@ -73,23 +77,6 @@ def data_iterator(masked_inputs:jnp.ndarray, inputs: jnp.ndarray, positions:jnp.
         yield dict(masked_input = masked_inputs[i:i+batchsize],
                 input=inputs[i:i + batchsize], 
                 position=positions[i:i + batchsize])
-        
-def load_multiple_datasets(dirs,args):
-    inputs_all = []
-    all_labels_all = {}
-    for dir in dirs:
-        print(f"Loading model zoo: {dir}")
-        inputs, all_labels = load_nets(n=args.num_networks, 
-                                   data_dir=dir,
-                                   flatten=False,
-                                   num_checkpoints=args.num_checkpoints)
-        inputs_all = inputs_all+inputs
-        if len(all_labels_all)==0:
-            all_labels_all = all_labels
-        else:
-            all_labels_all = {key: jnp.stack(all_labels_all[key],all_labels[key],axis=0) for key in all_labels.keys()}
-
-    return inputs_all, all_labels_all
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Training run')
@@ -101,8 +88,11 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, help='Number of epochs', default=25)
     # meta-model
     parser.add_argument('--model_size',type=int,help='MetaModel model_size parameter',default=4*32)
+    parser.add_argument('--num_layers',type=int,help='num of transformer layers',default=12)
     parser.add_argument('--chunk_size',type=int,help='meta model chunk size',default=128)
     parser.add_argument('--mask_prob',type=float,default=0.2)
+    parser.add_argument('--mask_single',action='store_true',help='Mask each weight individually')
+    parser.add_argument('--include_nonmasked_loss',action='store_true')
     # data
     parser.add_argument('--data_dir',type=str,default='model_zoo_jax/checkpoints/cifar10_lenet5_fixed_zoo')
     parser.add_argument('--num_checkpoints',type=int,default=4)
@@ -122,7 +112,11 @@ if __name__ == "__main__":
     rng = random.PRNGKey(args.seed)
     
     rng,subkey = random.split(rng)
-    MASK_TOKEN = random.uniform(subkey,(args.chunk_size,),minval=-100, maxval=100)
+    
+    if args.mask_single:
+        MASK_TOKEN=-100
+    else:
+        MASK_TOKEN = random.uniform(subkey,(args.chunk_size,),minval=-100, maxval=100)
 
     # Load model zoo checkpoints
     print(f"Loading model zoo: {args.data_dir}")
@@ -154,14 +148,14 @@ if __name__ == "__main__":
     model_config = ModelConfig(
         model_size=args.model_size,
         num_heads=8,
-        num_layers=12,
-        dropout_rate=0.0,
+        num_layers=args.num_layers,
+        dropout_rate=args.dropout,
         use_embedding=True,
     )
 
     # Initialization
     model = create_meta_model(model_config)
-    loss_fcn = MWMLossMSE(model.apply)
+    loss_fcn = MWMLossMSE(model.apply, non_masked=args.include_nonmasked_loss)
     opt = optax.adamw(learning_rate=args.lr, weight_decay=args.wd)
     updater = Updater(opt=opt, evaluator=loss_fcn, model_init=model.init)
     
@@ -176,17 +170,23 @@ if __name__ == "__main__":
     # logger
     logger = Logger(name = args.wandb_log_name,
                     config={
+                    "seed":args.seed,
                     "exp": args.exp,
                     "dataset": os.path.basename(args.data_dir),
                     "lr": args.lr,
                     "weight_decay": args.wd,
                     "batchsize": args.bs,
                     "num_epochs": args.epochs,
-                    "dropout": args.dropout},
+                    "dropout": args.dropout,
+                    "model_size":args.model_size,
+                    "num_layers":args.num_layers,
+                    "augment":args.augment},
                     log_wandb = args.use_wandb,
-                    save_checkpoints=False,
-                    log_interval=args.log_interval)
-    logger.init(is_save_config=False)
+                    save_checkpoints=True,
+                    save_interval=10,
+                    log_interval=args.log_interval,
+                    checkpoint_dir=os.path.join('checkpoints',args.exp,str(time.time())))
+    logger.init(is_save_config=True)
 
     # Training loop
     for epoch in range(args.epochs):
@@ -199,7 +199,7 @@ if __name__ == "__main__":
         rng, subkey = random.split(rng)
         images, _ = shuffle_data(subkey, images, np.zeros(len(images)))
         rng, subkey = random.split(rng)
-        masked_ins, inputs, positions = process_batch(subkey, images, MASK_TOKEN, args.mask_prob,args.chunk_size)
+        masked_ins, inputs, positions = process_batch(subkey, images, MASK_TOKEN, args.mask_prob,args.chunk_size,mask_individual=args.mask_single)
         batches = data_iterator(masked_ins, inputs, positions, batchsize=args.bs, skip_last=True)
 
         train_all_loss = []
