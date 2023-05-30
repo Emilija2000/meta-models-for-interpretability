@@ -90,7 +90,7 @@ def get_meta_model_fcn(config:MetaModelConfig, num_classes:int, model_type:str) 
     return model
 
 def load_pretrained_meta_model_parameters(params,path:str):
-    
+    print('Loading parameters from: ',path)
     pretrained_params = model_restore(path)
     flat_pretrained_params = tree_util.tree_flatten_with_path(pretrained_params)[0]
     
@@ -104,9 +104,14 @@ def load_pretrained_meta_model_parameters(params,path:str):
     
     def param_update(key, param):
         newparam = get_param_from_keypath(key)
-        if isinstance(newparam, jnp.ndarray) and jnp.shape(param)==jnp.shape(newparam):
+        if newparam is not None and jnp.shape(param)==jnp.shape(newparam):
+            #print(key, 'loaded')
             return newparam  # Replace param1 with param2 value
         else:
+            if newparam is not None:
+                print(jnp.shape(newparam))
+            print(jnp.shape(param))
+            #print(key, 'initialized')
             return param  # Keep param1 value as it is
     
     loaded_params = tree_util.tree_map_with_path(param_update, params)
