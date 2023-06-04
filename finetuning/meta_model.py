@@ -109,9 +109,8 @@ def load_pretrained_meta_model_parameters(params,path:str):
             return newparam  # Replace param1 with param2 value
         else:
             if newparam is not None:
-                print(jnp.shape(newparam))
-            print(jnp.shape(param))
-            #print(key, 'initialized')
+                print(jnp.shape(newparam),jnp.shape(param))
+            print(key, 'initialized')
             return param  # Keep param1 value as it is
     
     loaded_params = tree_util.tree_map_with_path(param_update, params)

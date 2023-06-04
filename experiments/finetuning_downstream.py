@@ -15,7 +15,7 @@ from meta_transformer.meta_model import MetaModelConfig as ModelConfig
 from model_zoo_jax import load_nets, shuffle_data, CrossEntropyLoss, MSELoss, Updater
 
 from finetuning import load_pretrained_state, get_meta_model_fcn
-from pretraining import Logger
+from pretraining import Logger, process_batch
 
 def split_data(data: list, labels: list):
     split_index = int(len(data)*0.8)
@@ -68,6 +68,8 @@ if __name__ == "__main__":
     # pretrained meta-model
     parser.add_argument('--model_type',type=str, help="Options: classifier, plus_linear, replaced_last", default='classifier')
     parser.add_argument('--pretrained_path',type=str,help='Pretrained model weights',default=None)
+    parser.add_argument('--mask_single',action='store_true',help='Mask each weight individually')
+    parser.add_argument('--mask_indicators',action='store_true',help='Include binary mask indicators to meta-model chunked input')
     # data
     parser.add_argument('--task', type=str, help='Task to train on.', default="class_dropped")
     parser.add_argument('--data_dir',type=str,default='/rds/user/ed614/hpc-work/model_zoo_datasets/downstream_droppedcls_mnist_smallCNN_fixed_zoo')
@@ -99,7 +101,7 @@ if __name__ == "__main__":
     # Filter (high variance)
     filtered_inputs, filtered_labels = filter_data(inputs, labels)
     
-    unpreprocess = preprocessing.get_unpreprocess(filtered_inputs[0], args.chunk_size)
+    #unpreprocess = preprocessing.get_unpreprocess(filtered_inputs[0], args.chunk_size)
     
     # Shuffle checkpoints before splitting
     rng, subkey = random.split(rng)
@@ -134,8 +136,10 @@ if __name__ == "__main__":
     updater = Updater(opt=opt, evaluator=evaluator, model_init=model.init)
     
     rng, subkey = random.split(rng)
-    dummy_input = [preprocessing.preprocess(inp, args.chunk_size)[0] for inp in train_inputs[:args.bs]]
-    dummy_input = jnp.stack(dummy_input)
+    dummy_input,_,_ = process_batch(jax.random.PRNGKey(0), train_inputs[:args.bs], 0,
+                                    mask_prob=0, chunk_size=args.chunk_size, 
+                                    mask_individual=args.mask_single, 
+                                    mask_indicators=args.mask_indicators)
     state = updater.init_params(subkey, x=utils.tree_stack(dummy_input)) #
     
     # switch params to pretrained
@@ -175,7 +179,11 @@ if __name__ == "__main__":
             images,labels = train_inputs,train_labels
         rng, subkey = random.split(rng)
         images, labels = shuffle_data(subkey, images, labels)
-        images = [preprocessing.preprocess(inp, args.chunk_size)[0] for inp in images]
+        images, _, _ = process_batch(subkey, images, 0, 
+                                            mask_prob=0,
+                                            chunk_size=args.chunk_size,
+                                            mask_individual=args.mask_single, 
+                                            mask_indicators=args.mask_indicators)
         batches = data_iterator(images, labels, batchsize=args.bs, skip_last=True)
 
         train_all_acc = []
@@ -190,7 +198,11 @@ if __name__ == "__main__":
             
         # Validate every epoch
         images, labels = shuffle_data(subkey, val_inputs, val_labels)
-        images = [preprocessing.preprocess(inp, args.chunk_size)[0] for inp in images]
+        images, _, _ = process_batch(subkey, images, 0, 
+                                            mask_prob=0,
+                                            chunk_size=args.chunk_size,
+                                            mask_individual=args.mask_single, 
+                                            mask_indicators=args.mask_indicators)
         batches = data_iterator(images, labels, batchsize=32, skip_last=True)
         val_all_acc = []
         val_all_loss = []

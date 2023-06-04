@@ -6,14 +6,14 @@ import optax
 from typing import Tuple, List, Iterator
 import time
 
+from meta_transformer import utils #,preprocessing
 from augmentations import augment_batch
 from model_zoo_jax import load_nets, shuffle_data
 
-from meta_transformer import utils, preprocessing
 from meta_transformer.meta_model import create_meta_model
 from meta_transformer.meta_model import MetaModelConfig as ModelConfig
 
-from pretraining import MWMLossMSE, Updater, Logger
+from pretraining import MWMLossMSE, Updater, Logger, process_batch
 
 import os
 import argparse
@@ -42,32 +42,6 @@ def filter_data(data: List[dict]):
           That's {100*(len(data) - len(f_data))/len(data):.2f}%.")
     return np.array(f_data)
 
-def mask_data(rng,inputs, mask_token=-100, mask_prob=0.2, individual_w=False):
-    masked_inputs = []
-    masked_positions = []
-
-    for seq in inputs:
-        if individual_w:
-            mask = jax.random.uniform(rng,seq.shape) < mask_prob
-        else:
-            seq_len = seq.shape[0]
-            mask = jax.random.uniform(rng,(seq_len,1)) < mask_prob
-        masked_seq = jnp.copy(seq)
-        masked_seq = masked_seq.at[jnp.where(mask)[0]].set(mask_token)
-        masked_inputs.append(masked_seq)
-        
-        if not(individual_w):
-            mask = jnp.tile(mask, (1,seq.shape[1]))
-        masked_positions.append(jnp.asarray(mask, dtype=jnp.int32))
-
-    return jnp.array(masked_inputs), masked_positions
-
-def process_batch(rng, inputs, mask_token=None, mask_prob=0, chunk_size=100, mask_individual=False):
-    inputs = [preprocessing.preprocess(inp, chunk_size)[0]
-                  for inp in inputs]
-    masked_inputs, masked_positions = mask_data(rng,inputs, mask_token, mask_prob,individual_w=mask_individual)
-    return masked_inputs, jnp.stack(inputs), masked_positions
-
 def data_iterator(masked_inputs:jnp.ndarray, inputs: jnp.ndarray, positions:jnp.ndarray,
                   batchsize: int = 1048, skip_last: bool = False) -> Iterator[Tuple[jnp.ndarray, jnp.ndarray]]:
     """Iterate over the data in batches."""
@@ -92,6 +66,7 @@ if __name__ == "__main__":
     parser.add_argument('--chunk_size',type=int,help='meta model chunk size',default=128)
     parser.add_argument('--mask_prob',type=float,default=0.2)
     parser.add_argument('--mask_single',action='store_true',help='Mask each weight individually')
+    parser.add_argument('--mask_indicators',action='store_true',help='Include binary mask indicators to meta-model chunked input')
     parser.add_argument('--include_nonmasked_loss',action='store_true')
     # data
     parser.add_argument('--data_dir',type=str,default='model_zoo_jax/checkpoints/cifar10_lenet5_fixed_zoo')
@@ -114,9 +89,10 @@ if __name__ == "__main__":
     rng,subkey = random.split(rng)
     
     if args.mask_single:
-        MASK_TOKEN=-100
+        MASK_TOKEN=0
     else:
-        MASK_TOKEN = random.uniform(subkey,(args.chunk_size,),minval=-100, maxval=100)
+        #MASK_TOKEN = random.uniform(subkey,(args.chunk_size,),minval=-100, maxval=100)
+        MASK_TOKEN = jnp.zeros((args.chunk_size,))
 
     # Load model zoo checkpoints
     print(f"Loading model zoo: {args.data_dir}")
@@ -125,7 +101,7 @@ if __name__ == "__main__":
                                    flatten=False,
                                    num_checkpoints=args.num_checkpoints)
     
-    unpreprocess = preprocessing.get_unpreprocess(inputs[0], args.chunk_size)
+    #unpreprocess = preprocessing.get_unpreprocess(inputs[0], args.chunk_size)
     
     # Filter (high variance)
     if args.filter:
@@ -161,8 +137,8 @@ if __name__ == "__main__":
     
     rng, subkey = random.split(rng)
         
-    dummy_input = [preprocessing.preprocess(inp, args.chunk_size)[0] for inp in train_inputs[:args.bs]]
-    dummy_input = jnp.stack(dummy_input)
+    dummy_input,_,_ = process_batch(jax.random.PRNGKey(0), train_inputs[:args.bs], 0,mask_prob=args.mask_prob, chunk_size=args.chunk_size, 
+                                    mask_individual=args.mask_single, mask_indicators=args.mask_indicators)
     state = updater.init_params(subkey, x=utils.tree_stack(dummy_input)) #
 
     print("Number of parameters:", utils.count_params(state.params) / 1e6, "Million")
@@ -179,11 +155,12 @@ if __name__ == "__main__":
                     "num_epochs": args.epochs,
                     "dropout": args.dropout,
                     "model_size":args.model_size,
+                    "chunk_size":args.chunk_size,
                     "num_layers":args.num_layers,
                     "augment":args.augment},
                     log_wandb = args.use_wandb,
                     save_checkpoints=True,
-                    save_interval=10,
+                    save_interval=5,
                     log_interval=args.log_interval,
                     checkpoint_dir=os.path.join('checkpoints',args.exp,str(time.time())))
     logger.init(is_save_config=True)
@@ -199,7 +176,11 @@ if __name__ == "__main__":
         rng, subkey = random.split(rng)
         images, _ = shuffle_data(subkey, images, np.zeros(len(images)))
         rng, subkey = random.split(rng)
-        masked_ins, inputs, positions = process_batch(subkey, images, MASK_TOKEN, args.mask_prob,args.chunk_size,mask_individual=args.mask_single)
+        masked_ins, inputs, positions = process_batch(subkey, images, MASK_TOKEN, 
+                                                      mask_prob=args.mask_prob,
+                                                      chunk_size=args.chunk_size,
+                                                      mask_individual=args.mask_single, 
+                                                      mask_indicators=args.mask_indicators)
         batches = data_iterator(masked_ins, inputs, positions, batchsize=args.bs, skip_last=True)
 
         train_all_loss = []
@@ -212,7 +193,11 @@ if __name__ == "__main__":
             
         # Validate every epoch
         rng, subkey = random.split(rng)
-        masked_ins, inputs, positions = process_batch(subkey, val_inputs, MASK_TOKEN, args.mask_prob,args.chunk_size)
+        masked_ins, inputs, positions = process_batch(subkey, val_inputs, MASK_TOKEN, 
+                                                      mask_prob=args.mask_prob,
+                                                      chunk_size=args.chunk_size,
+                                                      mask_individual=args.mask_single, 
+                                                      mask_indicators=args.mask_indicators)
         batches = data_iterator(masked_ins, inputs, positions, batchsize=args.bs, skip_last=True)
         val_all_loss = []
         for it, batch in enumerate(batches):

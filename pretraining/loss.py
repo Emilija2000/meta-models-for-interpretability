@@ -41,21 +41,26 @@ class MWMLossMSE(LossFcn):
     non_masked: bool = True
     
     def masked_loss_fn(self,predictions, targets, positions):
-        diff = []
+        #diff=[]
         #jax.debug.print("first prediction{}",jnp.isnan(predictions[0]))
         #jax.debug.print("how many masked: {}",jnp.sum(positions[0]))
-        for i,pos in enumerate(positions):
-            #n_masked = jnp.min(jnp.array([jnp.sum(pos),1]).astype(jnp.int32))
-            #print(n_masked)
-            sd = jnp.square(predictions[i]-targets[i])
-            masked_sd = jnp.multiply(pos, sd)
-            #diff.append(jnp.sum(masked_sd)/n_masked)
-            diff.append(jnp.sum(masked_sd))
-            #if jnp.isnan(diff[-1]):
-            #    print('NOT A NUMBER')
-            #    exit(-1)
+        #for i,pos in enumerate(positions):
+        #    #n_masked = jnp.min(jnp.array([jnp.sum(pos),1]).astype(jnp.int32))
+        #    #print(n_masked)
+        #    sd = jnp.square(predictions[i]-targets[i])
+        #    masked_sd = jnp.multiply(pos, sd)
+        #    #diff.append(jnp.sum(masked_sd)/n_masked)
+        #    diff.append(jnp.sum(masked_sd))
+        #    #if jnp.isnan(diff[-1]):
+        #    #    print('NOT A NUMBER')
+        #    #    exit(-1)
         #jax.debug.print("diff: {}",diff)
-        return jnp.mean(jnp.array(diff))
+        #return jnp.mean(jnp.array(diff))
+
+        diff = jnp.square(predictions-targets)
+        diff = jnp.multiply(positions, diff)
+        res = jnp.sum(diff)/(jnp.sum(positions)+0.0001)
+        return res
     
     def loss_fn(self, logits, targets, masked=None):
         masked_loss = self.masked_loss_fn(logits,targets,masked) if masked is not None else 0
@@ -88,7 +93,7 @@ class MWMLossCosine(LossFcn):
         masked_loss = self.masked_loss_fn(logits,targets,masked) if masked is not None else 0
         loss = masked_loss
         if self.non_masked:
-            unmasked_loss = self.masked_loss_fn(logits,targets,[1-m for m in masked])
+            unmasked_loss = self.masked_loss_fn(logits,targets,1-masked)
             loss = loss + unmasked_loss
         return loss
     
