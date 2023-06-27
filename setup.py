@@ -18,8 +18,8 @@ setup(
         "wandb",
         "pytest",
         # Other github repos
-        'meta-transformer @ git+ssh://git@github.com:langosco/meta-transformer.git',
-        'neural-net-augmentations @ git+ssh://git@github.com:Emilija2000/neural-net-augmentation.git',
-        'model-zoo @ git+ssh://git@github.com:Emilija2000/model-zoo-jax.git'
+        #'meta-transformer @ git+ssh://git@github.com:langosco/meta-transformer.git',
+        #'neural-net-augmentations @ git+ssh://git@github.com:Emilija2000/neural-net-augmentation.git',
+        #'model-zoo-jax @ git+ssh://git@github.com:Emilija2000/model-zoo-jax.git'
     ]
 )
