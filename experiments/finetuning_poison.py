@@ -10,7 +10,7 @@ from typing import Tuple, List, Iterator
 import time
 
 from augmentations import augment_batch
-from meta_transformer import utils
+from meta_transformer import utils, torch_utils
 from meta_transformer.meta_model import MetaModelConfig as ModelConfig
 from model_zoo_jax import load_nets, shuffle_data, CrossEntropyLoss, MSELoss, Updater
 
@@ -73,7 +73,7 @@ if __name__ == "__main__":
     parser.add_argument('--mask_indicators',action='store_true',help='Include binary mask indicators to meta-model chunked input')
     # data
     parser.add_argument('--task', type=str, help='Task to train on.', default="class_dropped")
-    parser.add_argument('--data_dir',type=str,default='/rds/user/ed614/hpc-work/model_zoo_datasets/downstream_droppedcls_mnist_smallCNN_fixed_zoo')
+    parser.add_argument('--data_dir',type=str,default='/rds/user/ed614/hpc-work/model_zoo_datasets/cifar10_nodropout/cifar10_nodropout')
     parser.add_argument('--num_checkpoints',type=int,default=1)
     parser.add_argument('--num_networks',type=int,default=None)
     # augmentations
@@ -91,13 +91,11 @@ if __name__ == "__main__":
 
     # Load model zoo checkpoints
     print(f"Loading model zoo: {args.data_dir}")
-    inputs, all_labels = load_nets(n=args.num_networks, 
-                                   data_dir=args.data_dir,
-                                   flatten=False,
-                                   num_checkpoints=args.num_checkpoints)
+    inputs1, _ = torch_utils.load_pytorch_nets(n=args.num_networks, data_dir=os.path.join(args.data_dir, "poison_easy"))
+    inputs2, _ = torch_utils.load_pytorch_nets(n=args.num_networks, data_dir=os.path.join(args.data_dir, "clean"))
     
-    print(f"Training task: {args.task}.")
-    labels = all_labels[args.task]
+    inputs = inputs1 + inputs2
+    labels = jnp.concatenate(jnp.zeros((len(inputs1),1)), jnp.ones((len(inputs2),1)), axis=0)
     
     # Filter (high variance)
     filtered_inputs, filtered_labels = filter_data(inputs, labels)

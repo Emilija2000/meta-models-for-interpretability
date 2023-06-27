@@ -1,13 +1,10 @@
-from meta_transformer import preprocessing
+from chunking import preprocessing
 
 import jax
 import jax.numpy as jnp
 
 
-def mask_data_bert():
-    pass
-
-def mask_data(rng, inputs, mask_token=0., mask_prob:float=0.15, individual_w:bool=False, binary_indicator:bool=True):
+def mask_data(rng, inputs, mask_token=0., mask_prob:float=0.15, individual_w:bool=False, binary_indicator:bool=True, resample_zeromasks:bool=True):
     '''
     Masks input sequence
     
@@ -28,15 +25,22 @@ def mask_data(rng, inputs, mask_token=0., mask_prob:float=0.15, individual_w:boo
     '''
     masked_inputs = []
     masked_positions = []
+    non_masked_net_positions=[]
 
     for seq in inputs:
         # randomly choose weights to mask
-        if individual_w:
-            mask = jax.random.uniform(rng,seq.shape) < mask_prob
-        else:
-            seq_len = seq.shape[0]
-            mask = jax.random.uniform(rng,(seq_len,1)) < mask_prob
+        mask_nonzero_flag = False
+        while not mask_nonzero_flag:
+            rng, subkey = jax.random.split(rng)
+            if individual_w:
+                mask = jax.random.uniform(subkey,seq.shape) < mask_prob
+            else:
+                mask = jax.random.uniform(subkey,(seq.shape[0],1)) < mask_prob
             
+            mask_nonzero_flag = jnp.sum(mask) > 0
+            if not(resample_zeromasks):
+                mask_nonzero_flag = True
+                
         # replace weights with mask token
         masked_seq = jnp.copy(seq)
         masked_seq = masked_seq.at[jnp.where(mask)[0]].set(mask_token)
@@ -46,24 +50,32 @@ def mask_data(rng, inputs, mask_token=0., mask_prob:float=0.15, individual_w:boo
             masked_ind = 1.0*mask
             masked_seq = jnp.concatenate([masked_seq, masked_ind], axis=1)
          
+        non_masked_net = 1 - mask
         # do not consider indicator part output in loss calc -> add zeros to mask
         # TODO: should they be considered??
         original_mask_shape = mask.shape
         if not(individual_w):
             mask = jnp.tile(mask, (1,seq.shape[1]))
+            non_masked_net = jnp.tile(non_masked_net, (1,seq.shape[1]))
         if binary_indicator:
             mask = jnp.concatenate([mask, jnp.zeros(original_mask_shape)],axis=1)
+            non_masked_net = jnp.concatenate([non_masked_net, jnp.zeros(original_mask_shape)],axis=1)
             
         masked_inputs.append(masked_seq) 
         masked_positions.append(jnp.asarray(mask, dtype=jnp.int32))
+        non_masked_net_positions.append(jnp.asarray(non_masked_net, dtype=jnp.int32))
 
-    return masked_inputs, masked_positions
+    return masked_inputs, masked_positions, non_masked_net_positions
 
-def process_batch(rng, inputs, mask_token=None, mask_prob=0, chunk_size=100, mask_individual=False, mask_indicators=True):
+def process_batch(rng, inputs, mask_token=None, mask_prob=0, chunk_size=100, mask_individual=False, mask_indicators=True,resample_zeromasks=True, layerwise=True):
     '''Output masked inputs, "labels" and binary matrix of masked positions'''
     # chunk weights (tokenize) and mask
-    inputs = [preprocessing.preprocess(inp, chunk_size)[0] for inp in inputs]
-    masked_inputs, masked_positions = mask_data(rng, inputs, mask_token, mask_prob,individual_w=mask_individual, binary_indicator=mask_indicators)
+    if layerwise:
+        inputs = [preprocessing.preprocess_layerwise(inp, chunk_size)[0] for inp in inputs]
+    else: 
+        inputs = [preprocessing.preprocess(inp, chunk_size)[0] for inp in inputs]
+    
+    masked_inputs, masked_positions, non_masked_positions = mask_data(rng, inputs, mask_token, mask_prob,individual_w=mask_individual, binary_indicator=mask_indicators, resample_zeromasks=resample_zeromasks)
     # pad labels to the correct shape (if indicator tokens are added to masked_inputs)
     labels = []
     for inp, m_inp in zip(inputs, masked_inputs):
@@ -75,8 +87,9 @@ def process_batch(rng, inputs, mask_token=None, mask_prob=0, chunk_size=100, mas
     labels = pad_and_stack_arrays(labels)
     masked_positions = pad_and_stack_arrays(masked_positions)
     masked_positions = masked_positions.astype(bool)
+    non_masked_positions = pad_and_stack_arrays(non_masked_positions)
     
-    return masked_inputs, labels, masked_positions
+    return masked_inputs, labels, masked_positions, non_masked_positions
 
 def pad_and_stack_arrays(arrays):
     '''given a list of arrays of shape (x_i,y) for i in {1..arrays len}, pad along dim 0 and stack'''

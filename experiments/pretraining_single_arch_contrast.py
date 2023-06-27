@@ -14,7 +14,7 @@ from model_zoo_jax import load_nets, shuffle_data
 from meta_transformer.meta_model import create_meta_model
 from meta_transformer.meta_model import MetaModelConfig as ModelConfig
 
-from pretraining import MWMLossMSE, MWMLossMseNormalized, Updater, Logger, process_batch
+from pretraining import MWMLossMseNAndContrast, Updater, Logger, process_batch
 
 import os
 import argparse
@@ -50,17 +50,13 @@ def filter_poorly_trained(data:List[dict], accs:List[ArrayLike]):
           That's {100*(len(data) - len(f_data))/len(data):.2f}%.")
     return np.array(f_data)
 
-def data_iterator(masked_inputs:jnp.ndarray, inputs: jnp.ndarray, positions:jnp.ndarray, non_positions:jnp.ndarray,
-                  batchsize: int = 1048, skip_last: bool = False,variances:ArrayLike=None) -> Iterator[Tuple[jnp.ndarray, jnp.ndarray]]:
+def data_iterator(inputs:jnp.ndarray,
+                  batchsize: int = 1048, skip_last: bool = False):
     """Iterate over the data in batches."""
     for i in range(0, len(inputs), batchsize):
         if skip_last and i + batchsize > len(inputs):
             break
-        yield dict(masked_input = masked_inputs[i:i+batchsize],
-                input=inputs[i:i + batchsize], 
-                position=positions[i:i + batchsize],
-                non_position=non_positions[i:i+batchsize],
-                variances=variances)
+        yield inputs[i:i + batchsize]
         
 
 def learning_rate_schedule(warmup_epochs, total_epochs, peak_lr, steps_per_epoch, decay_epochs=[0.5, 0.75], decay_factor=0.1):
@@ -178,9 +174,7 @@ if __name__ == "__main__":
 
     # Initialization
     model = create_meta_model(model_config)
-    loss_fcn = MWMLossMseNormalized(model.apply, non_masked=args.include_nonmasked_loss)
-    #loss_fcn = MWMLossMSE(model.apply, non_masked=args.include_nonmasked_loss)
-    #loss_fcn = MWMLossCosine(model.apply, non_masked=args.include_nonmasked_loss)
+    loss_fcn = MWMLossMseNAndContrast(model.apply, non_masked=args.include_nonmasked_loss, temperature=1.0, beta=0.9)
     opt = optax.adamw(learning_rate=lr_schedule, weight_decay=args.wd)
     updater = Updater(opt=opt, evaluator=loss_fcn, model_init=model.init)
     
@@ -205,8 +199,8 @@ if __name__ == "__main__":
                     "dropout": args.dropout,
                     "model_size":args.model_size,
                     "chunk_size":args.chunk_size,
-                    "num_layers":args.num_layers,
-                    "augment":args.augment},
+                    "num_layers":args.num_layers
+                    },
                     log_wandb = args.use_wandb,
                     save_checkpoints=True,
                     save_interval=10,
@@ -222,38 +216,68 @@ if __name__ == "__main__":
             images,_ = augment_batch(subkey,train_inputs,np.zeros(len(train_inputs)),num_p=args.num_augment,keep_original=False)
         else:
             images = train_inputs
+        
         rng, subkey = random.split(rng)
         images, _ = shuffle_data(subkey, images, np.zeros(len(images)))
-        rng, subkey = random.split(rng)
-        masked_ins, masked_labels, positions, non_masked_positions = process_batch(subkey, images, MASK_TOKEN, 
+        batches = data_iterator(images, batchsize=args.bs, skip_last=True)
+        
+        train_all_loss = []
+        for it, batch in enumerate(batches):
+            rng,subkey = random.split(rng)
+            # split two augmentations of the same network, mask them in the same way and concatinate again
+            batch_aug,_ = augment_batch(subkey,batch,np.zeros(len(batch)),num_p=1,keep_original=False)
+            rng, subkey = random.split(rng)
+            masked_ins, masked_labels, positions, non_masked_positions = process_batch(subkey, batch,
+                                                      MASK_TOKEN, 
                                                       mask_prob=args.mask_prob,
                                                       chunk_size=args.chunk_size,
                                                       mask_individual=args.mask_single, 
                                                       mask_indicators=args.mask_indicators)
-        batches = data_iterator(masked_ins, masked_labels, positions,non_masked_positions, batchsize=args.bs, skip_last=True,variances=chunk_vars)
-
-        train_all_loss = []
-        for it, batch in enumerate(batches):
-            #batch["input"] = utils.tree_stack(batch["input"])
-            state, train_metrics = updater.train_step(state, (batch['masked_input'],batch['input'],batch['position'],batch['non_position'],batch['variances']))
-            #logger.log(state, train_metrics)
+            masked_ins_aug, masked_labels_aug, positions_aug, non_masked_positions_aug = process_batch(subkey, batch_aug,
+                                                      MASK_TOKEN, 
+                                                      mask_prob=args.mask_prob,
+                                                      chunk_size=args.chunk_size,
+                                                      mask_individual=args.mask_single, 
+                                                      mask_indicators=args.mask_indicators)
+            masked_ins = jnp.concatenate([masked_ins,masked_ins_aug],axis=0)
+            masked_labels = jnp.concatenate([masked_labels,masked_labels_aug],axis=0)
+            positions = jnp.concatenate([positions,positions_aug],axis=0)
+            non_masked_positions = jnp.concatenate([non_masked_positions,non_masked_positions_aug],axis=0)
+            # normal training step
+            state, train_metrics = updater.train_step(state, (masked_ins,masked_labels,positions,non_masked_positions,chunk_vars))
+            logger.log(state, train_metrics)
             train_all_loss.append(train_metrics['train/loss'].item())
         train_metrics = {'train/loss':np.mean(train_all_loss)}
             
         # Validate every epoch
-        rng, subkey = random.split(rng)
-        masked_ins, masked_labels, positions,non_masked_positions = process_batch(subkey, val_inputs, MASK_TOKEN, 
+        batches = data_iterator(val_inputs, batchsize=args.bs, skip_last=True)
+        val_all_loss = []
+        for it, batch in enumerate(batches):
+            
+            rng,subkey = random.split(rng)
+            # split two augmentations of the same network, mask them in the same way and concatinate again
+            batch_aug,_ = augment_batch(subkey,batch,np.zeros(len(batch)),num_p=1,keep_original=False)
+            rng, subkey = random.split(rng)
+            masked_ins, masked_labels, positions, non_masked_positions = process_batch(subkey, batch,
+                                                      MASK_TOKEN, 
                                                       mask_prob=args.mask_prob,
                                                       chunk_size=args.chunk_size,
                                                       mask_individual=args.mask_single, 
                                                       mask_indicators=args.mask_indicators)
-        batches = data_iterator(masked_ins, masked_labels, positions,non_masked_positions, batchsize=args.bs, skip_last=True,variances=chunk_vars)
-        val_all_loss = []
-        for it, batch in enumerate(batches):
-            #batch["input"] = utils.tree_stack(batch["input"])
-            state, val_metrics = updater.val_step(state, (batch['masked_input'],batch['input'],batch['position'],batch['non_position'],batch['variances']))
+            masked_ins_aug, masked_labels_aug, positions_aug, non_masked_positions_aug = process_batch(subkey, batch_aug,
+                                                      MASK_TOKEN, 
+                                                      mask_prob=args.mask_prob,
+                                                      chunk_size=args.chunk_size,
+                                                      mask_individual=args.mask_single, 
+                                                      mask_indicators=args.mask_indicators)
+            masked_ins = jnp.concatenate([masked_ins,masked_ins_aug],axis=0)
+            masked_labels = jnp.concatenate([masked_labels,masked_labels_aug],axis=0)
+            positions = jnp.concatenate([positions,positions_aug],axis=0)
+            non_masked_positions = jnp.concatenate([non_masked_positions,non_masked_positions_aug],axis=0)
+            
+            #normal val step
+            state, val_metrics = updater.val_step(state, (masked_ins,masked_labels,positions,non_masked_positions,chunk_vars))
             #logger.log(state, val_metrics)
             val_all_loss.append(val_metrics['val/loss'].item())
         val_metrics = {'val/loss':np.mean(val_all_loss)}
-            
         logger.log(state, train_metrics, val_metrics)

@@ -1,1 +1,1 @@
-from finetuning.meta_model import get_meta_model_fcn, load_pretrained_state
+from finetuning.meta_model import get_meta_model_fcn, load_pretrained_state, load_pretrained_meta_model_parameters

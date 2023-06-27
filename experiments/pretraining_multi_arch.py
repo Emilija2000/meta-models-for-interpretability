@@ -8,13 +8,13 @@ from typing import Tuple, List, Iterator
 import time
 
 from meta_transformer import utils 
-from augmentations import augment_batch
-from model_zoo_jax import load_nets, shuffle_data
+from augmentations import augment, augment_whole
+from model_zoo_jax import load_nets, shuffle_data, load_multiple_datasets
 
 from meta_transformer.meta_model import create_meta_model
 from meta_transformer.meta_model import MetaModelConfig as ModelConfig
 
-from pretraining import MWMLossMSE, MWMLossMseNormalized, Updater, Logger, process_batch
+from pretraining import MWMLossMSE, Updater, Logger, process_batch
 
 import os
 import argparse
@@ -97,7 +97,6 @@ if __name__ == "__main__":
     #parser.add_argument('--mask_indicators',type=bool, default=True,help='Include binary mask indicators to meta-model chunked input')
     parser.add_argument('--include_nonmasked_loss',action='store_true')
     # data
-    parser.add_argument('--data_dir',type=str,default='/rds/user/ed614/hpc-work/model_zoo_datasets/mnist_smallCNN_fixed_zoo')
     parser.add_argument('--num_checkpoints',type=int,default=1)
     parser.add_argument('--num_networks',type=int,default=None)
     parser.add_argument('--filter', action='store_true', help='Filter out high variance NN weights')
@@ -119,6 +118,10 @@ if __name__ == "__main__":
     
     rng,subkey = random.split(rng)
     
+    DIR1 = '/rds/user/ed614/hpc-work/model_zoo_datasets/mnist_smallCNN_fixed_zoo'
+    DIR2 = '/rds/user/ed614/hpc-work/model_zoo_datasets/cifar10_lenet5_fixed_zoo'
+    DIR3 = '/rds/user/ed614/hpc-work/model_zoo_datasets/mnist_smallCNN_random_zoo'
+    
     if args.mask_single:
         MASK_TOKEN=0
     else:
@@ -126,13 +129,13 @@ if __name__ == "__main__":
         MASK_TOKEN = jnp.zeros((args.chunk_size,))
 
     # Load model zoo checkpoints
-    print(f"Loading model zoo: {args.data_dir}")
-    inputs, labels = load_nets(n=args.num_networks, 
-                                   data_dir=args.data_dir,
-                                   flatten=False,
-                                   num_checkpoints=args.num_checkpoints)
+    print(f"Loading model zoo")
+    inputs, labels = load_multiple_datasets([DIR1, DIR2, DIR3],
+                                            num_networks=args.num_networks,
+                                            num_checkpoints=args.num_checkpoints,
+                                            verbose=True,
+                                            bs=args.bs) #load multiple of bs so we can batch augment and process
     
-    #unpreprocess = preprocessing.get_unpreprocess(inputs[0], args.chunk_size)
     
     # Filter (high variance and poorly trained networks)
     if args.filter:
@@ -141,10 +144,9 @@ if __name__ == "__main__":
         
     # Shuffle checkpoints before splitting
     rng, subkey = random.split(rng)
-    filtered_inputs, _ = shuffle_data(subkey,inputs,np.zeros(len(inputs)),chunks=args.num_checkpoints)
+    filtered_inputs, _ = shuffle_data(subkey,inputs,np.zeros(len(inputs)),chunks=args.num_checkpoints*args.bs)
     
     train_inputs, val_inputs = split_data(filtered_inputs)
-    val_data = utils.tree_stack(val_inputs)
 
     steps_per_epoch = len(train_inputs) // args.bs
     print()
@@ -152,18 +154,6 @@ if __name__ == "__main__":
     print("Steps per epoch:", steps_per_epoch)
     print("Total number of steps:", steps_per_epoch * args.epochs)
     print()
-    
-    # calculating chunk stats - loss normalization
-    chunked_ins,_,_,_ = process_batch(random.PRNGKey(0), train_inputs[:1000], 0,
-                                    mask_prob=0, chunk_size=args.chunk_size, 
-                                    mask_individual=args.mask_single, 
-                                    mask_indicators=False,resample_zeromasks=False)
-    chunked_ins=jnp.transpose(chunked_ins,axes=[1,0,2])
-    #means = jnp.mean(jnp.reshape(chunked_ins,(chunked_ins.shape[0],-1)),axis=1)
-    chunk_vars = jnp.std(jnp.reshape(chunked_ins,(chunked_ins.shape[0],-1)),axis=1)
-    #chunk_vars = jnp.ones(chunk_vars.shape)
-    chunk_vars = jnp.square(chunk_vars)
-    print("Chunk variances calculated\n")
 
     # model
     model_config = ModelConfig(
@@ -178,9 +168,7 @@ if __name__ == "__main__":
 
     # Initialization
     model = create_meta_model(model_config)
-    loss_fcn = MWMLossMseNormalized(model.apply, non_masked=args.include_nonmasked_loss)
-    #loss_fcn = MWMLossMSE(model.apply, non_masked=args.include_nonmasked_loss)
-    #loss_fcn = MWMLossCosine(model.apply, non_masked=args.include_nonmasked_loss)
+    loss_fcn = MWMLossMSE(model.apply, non_masked=args.include_nonmasked_loss)
     opt = optax.adamw(learning_rate=lr_schedule, weight_decay=args.wd)
     updater = Updater(opt=opt, evaluator=loss_fcn, model_init=model.init)
     
@@ -197,7 +185,7 @@ if __name__ == "__main__":
                     config={
                     "seed":args.seed,
                     "exp": args.exp,
-                    "dataset": os.path.basename(args.data_dir),
+                    "dataset": "all",
                     "lr": args.lr,
                     "weight_decay": args.wd,
                     "batchsize": args.bs,
@@ -219,18 +207,18 @@ if __name__ == "__main__":
         rng,subkey = random.split(rng)
         
         if args.augment:
-            images,_ = augment_batch(subkey,train_inputs,np.zeros(len(train_inputs)),num_p=args.num_augment,keep_original=False)
+            images,_ = augment_whole(subkey,train_inputs,np.zeros(len(train_inputs)),num_p=args.num_augment,keep_original=False)
         else:
             images = train_inputs
         rng, subkey = random.split(rng)
-        images, _ = shuffle_data(subkey, images, np.zeros(len(images)))
+        images, _ = shuffle_data(subkey, images, np.zeros(len(images)),chunks=args.num_checkpoints*args.bs)
         rng, subkey = random.split(rng)
         masked_ins, masked_labels, positions, non_masked_positions = process_batch(subkey, images, MASK_TOKEN, 
                                                       mask_prob=args.mask_prob,
                                                       chunk_size=args.chunk_size,
                                                       mask_individual=args.mask_single, 
                                                       mask_indicators=args.mask_indicators)
-        batches = data_iterator(masked_ins, masked_labels, positions,non_masked_positions, batchsize=args.bs, skip_last=True,variances=chunk_vars)
+        batches = data_iterator(masked_ins, masked_labels, positions,non_masked_positions, batchsize=args.bs, skip_last=True)
 
         train_all_loss = []
         for it, batch in enumerate(batches):
@@ -247,7 +235,7 @@ if __name__ == "__main__":
                                                       chunk_size=args.chunk_size,
                                                       mask_individual=args.mask_single, 
                                                       mask_indicators=args.mask_indicators)
-        batches = data_iterator(masked_ins, masked_labels, positions,non_masked_positions, batchsize=args.bs, skip_last=True,variances=chunk_vars)
+        batches = data_iterator(masked_ins, masked_labels, positions,non_masked_positions, batchsize=args.bs, skip_last=True)
         val_all_loss = []
         for it, batch in enumerate(batches):
             #batch["input"] = utils.tree_stack(batch["input"])
