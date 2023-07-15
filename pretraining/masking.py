@@ -67,11 +67,14 @@ def mask_data(rng, inputs, mask_token=0., mask_prob:float=0.15, individual_w:boo
 
     return masked_inputs, masked_positions, non_masked_net_positions
 
-def process_batch(rng, inputs, mask_token=None, mask_prob=0, chunk_size=100, mask_individual=False, mask_indicators=True,resample_zeromasks=True, layerwise=True):
+def process_batch(rng, inputs, mask_token=None, mask_prob=0, chunk_size=100, mask_individual=False, mask_indicators=True,resample_zeromasks=True, layerwise=True,layerind=False):
     '''Output masked inputs, "labels" and binary matrix of masked positions'''
     # chunk weights (tokenize) and mask
     if layerwise:
-        inputs = [preprocessing.preprocess_layerwise(inp, chunk_size)[0] for inp in inputs]
+        if layerind:
+            inputs = [preprocessing.preprocess_withindicators(inp, chunk_size)[0] for inp in inputs]
+        else:
+            inputs = [preprocessing.preprocess_layerwise(inp, chunk_size)[0] for inp in inputs]
     else: 
         inputs = [preprocessing.preprocess(inp, chunk_size)[0] for inp in inputs]
     
