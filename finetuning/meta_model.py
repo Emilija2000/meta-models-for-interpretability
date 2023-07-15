@@ -28,6 +28,7 @@ def get_meta_model_fcn(config:MetaModelConfig, num_classes:int, model_type:str) 
             net = MetaModel(
                 model_size=config.model_size,
                 use_embedding=config.use_embedding,
+                max_seq_len=config.max_seq_len,
                 transformer=Transformer(
                     num_heads=config.num_heads,
                     num_layers=config.num_layers,
@@ -55,6 +56,7 @@ def get_meta_model_fcn(config:MetaModelConfig, num_classes:int, model_type:str) 
                 net = MetaModel(
                     model_size=config.model_size,
                     use_embedding=False,
+                    max_seq_len=config.max_seq_len,
                     transformer=Transformer(
                         num_heads=config.num_heads,
                         num_layers=config.num_layers,
@@ -67,6 +69,34 @@ def get_meta_model_fcn(config:MetaModelConfig, num_classes:int, model_type:str) 
                 x = hk.Flatten()(x)
                 y = hk.Linear(num_classes)(x)
                 return y
+    elif model_type=="avgpool":
+        # replace the last layer with a new linear layer
+        if config.use_embedding:
+        
+            # TODO: hard coded for now - recognize replaced embedding layer
+            def f(x):
+                linear =hk.Sequential([lambda a: hk.Linear(config.model_size)(a)],name="helper_name")
+                return linear(x)
+                
+            @hk.transform
+            def model(input_batch: dict,
+                    is_training: bool = True) -> ArrayLike:
+                net = MetaModel(
+                    model_size=config.model_size,
+                    use_embedding=False,
+                    max_seq_len=config.max_seq_len,
+                    transformer=Transformer(
+                        num_heads=config.num_heads,
+                        num_layers=config.num_layers,
+                        key_size=config.key_size,
+                        dropout_rate=config.dropout_rate,
+                    )) 
+                
+                input_batch = f(input_batch)
+                x = net(input_batch, is_training=is_training)
+                x = jnp.mean(x,axis=1)
+                y = hk.Linear(num_classes)(x)
+                return y
         else:
             @hk.transform
             def model(input_batch: dict,
@@ -74,6 +104,7 @@ def get_meta_model_fcn(config:MetaModelConfig, num_classes:int, model_type:str) 
                 net = MetaModel(
                     model_size=config.model_size,
                     use_embedding=False,
+                    max_seq_len=config.max_seq_len,
                     transformer=Transformer(
                         num_heads=config.num_heads,
                         num_layers=config.num_layers-1, #replace the last transformer layer
@@ -93,11 +124,15 @@ def load_pretrained_meta_model_parameters(params,path:str):
     print('Loading parameters from: ',path)
     pretrained_params = model_restore(path)
     flat_pretrained_params = tree_util.tree_flatten_with_path(pretrained_params)[0]
+    #print(tree_util.tree_map(lambda x:x.shape, pretrained_params))
+    #print(tree_util.tree_map(lambda x:x.shape, params))
     
     def get_param_from_keypath(key, tree=flat_pretrained_params):
         # TODO: hard coded for now - recognize replaced embedding layer
         key = tree_util.tree_map(lambda k: tree_util.DictKey(key=k.key.replace('helper_name', 'meta_model')) if k.key.startswith('helper_name') else k, key)
         for keypath, param in tree:
+            keypath = tree_util.tree_map(lambda k: tree_util.DictKey(key=k.key.replace('meta_model_with_aux', 'meta_model')), keypath)
+            keypath = tree_util.tree_map(lambda k: tree_util.DictKey(key=k.key.replace('transformer_with_aux', 'transformer')), keypath)
             if key==keypath:
                 return param
         return None
