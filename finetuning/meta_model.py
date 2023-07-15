@@ -4,8 +4,8 @@ import jax.tree_util as tree_util
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 
-from meta_transformer.meta_model import create_meta_model_classifier, MetaModel, Transformer
-from meta_transformer.meta_model import MetaModelConfig, MetaModelClassifierConfig
+from model.meta_model import create_meta_model_classifier, MetaModel, Transformer
+from model.meta_model import MetaModelConfig, MetaModelClassifierConfig
 from model_zoo_jax import model_restore, TrainState
 
 def get_meta_model_fcn(config:MetaModelConfig, num_classes:int, model_type:str) -> hk.Transformed:
