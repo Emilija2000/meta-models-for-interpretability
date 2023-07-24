@@ -9,39 +9,16 @@ import os
 from typing import Tuple, List, Iterator
 import time
 
-from augmentations import augment_batch
-from meta_transformer import utils
-from meta_transformer.meta_model import MetaModelConfig as ModelConfig
-from model_zoo_jax import load_nets, shuffle_data, CrossEntropyLoss, MSELoss, Updater
-
+# model
+from model.meta_model import MetaModelConfig as ModelConfig
 from finetuning import load_pretrained_state, get_meta_model_fcn
+
+# data
+from model_zoo_jax import load_data, shuffle_data, CrossEntropyLoss, MSELoss, Updater
+from torchload import load_modelzoo
+from augmentations import augment_batch
+
 from pretraining import Logger, process_batch
-
-def split_data(data: list, labels: list):
-    split_index = int(len(data)*0.8)
-    return (data[:split_index], labels[:split_index], 
-            data[split_index:], labels[split_index:])
-
-def flatten(x):
-    return jax.flatten_util.ravel_pytree(x)[0]
-
-def is_fine(params: dict):
-    """Return false if std or mean is too high."""
-    flat = flatten(params)
-    if flat.std() > 5.0 or jnp.abs(flat.mean()) > 5.0:
-        return False
-    else:
-        return True
-
-def filter_data(data: List[dict], labels: List[ArrayLike]):
-    """Given a list of net params, filter out those
-    with very large means or stds."""
-    assert len(data) == len(labels)
-    f_data, f_labels = zip(*[(x, y) for x, y in zip(data, labels) if is_fine(x)])
-    print(f"Filtered out {len(data) - len(f_data)} nets.\
-          That's {100*(len(data) - len(f_data))/len(data):.2f}%.")
-    return np.array(f_data), np.array(f_labels)
-
 
 def data_iterator(inputs: jnp.ndarray, labels: jnp.ndarray, batchsize: int = 1048, skip_last: bool = False) -> Iterator[Tuple[jnp.ndarray, jnp.ndarray]]:
     """Iterate over the data in batches."""
@@ -67,11 +44,13 @@ if __name__ == "__main__":
     parser.add_argument('--chunk_size',type=int,help='meta model chunk size',default=128)
     parser.add_argument('--num_classes',type=int,help='Number of classes for this downstream task',default=10)
     # pretrained meta-model
-    parser.add_argument('--model_type',type=str, help="Options: classifier, plus_linear, replaced_last", default='classifier')
+    parser.add_argument('--model_type',type=str, help="Options: classifier, plus_linear, replace_last", default='classifier')
     parser.add_argument('--pretrained_path',type=str,help='Pretrained model weights',default=None)
     parser.add_argument('--mask_single',action='store_true',help='Mask each weight individually')
     parser.add_argument('--mask_indicators',action='store_true',help='Include binary mask indicators to meta-model chunked input')
     # data
+    parser.add_argument('--dataset_type',type=str,help='My dataset or external torch dataset. Values:myzoo or torchzoo',default='myzoo')
+    parser.add_argument('--filter', action='store_true', help='Filter large variance in model zoo')
     parser.add_argument('--task', type=str, help='Task to train on.', default="class_dropped")
     parser.add_argument('--data_dir',type=str,default='/rds/user/ed614/hpc-work/model_zoo_datasets/downstream_droppedcls_mnist_smallCNN_fixed_zoo')
     parser.add_argument('--num_checkpoints',type=int,default=1)
@@ -89,31 +68,28 @@ if __name__ == "__main__":
     
     rng = random.PRNGKey(args.seed)
 
-    # Load model zoo checkpoints
-    print(f"Loading model zoo: {args.data_dir}")
-    inputs, all_labels = load_nets(n=args.num_networks, 
-                                   data_dir=args.data_dir,
-                                   flatten=False,
-                                   num_checkpoints=args.num_checkpoints)
-    
-    print(f"Training task: {args.task}.")
-    labels = all_labels[args.task]
-    
-    # Filter (high variance)
-    filtered_inputs, filtered_labels = filter_data(inputs, labels)
-    
-    #unpreprocess = preprocessing.get_unpreprocess(filtered_inputs[0], args.chunk_size)
-    
-    # Shuffle checkpoints before splitting
-    rng, subkey = random.split(rng)
-    filtered_inputs, filtered_labels = shuffle_data(subkey,filtered_inputs,filtered_labels,chunks=args.num_checkpoints)
-    
-    train_inputs, train_labels, val_inputs, val_labels = split_data(filtered_inputs, filtered_labels)
-    val_data = {"input": utils.tree_stack(val_inputs), "label": val_labels}
+    # Load data
+    if args.dataset_type == 'myzoo':
+        rng,subkey = random.split()
+        train_inputs, train_labels, val_inputs, val_labels, test_inputs, test_labels = load_data(subkey, args.data_dir, args.task,args.num_networks,args.num_checkpoints, is_filter=args.filter)
+    else:
+        train_inputs, train_labels, val_inputs, val_labels, test_inputs, test_labels = load_modelzoo(args.data_dir, args.task, epochs=list(range(0,51,50//args.num_checkpoints))[1:])
+
+        # Keep a subset for finetuning/baseline
+        splitkey = random.PRNGKey(123)
+        train_inputs, train_labels = shuffle_data(splitkey, train_inputs, train_labels)
+        train_inputs, train_labels = train_inputs[-500:], train_labels[-500:]
+        val_inputs, val_labels = shuffle_data(splitkey, val_inputs, val_labels)
+        val_inputs, val_labels =  val_inputs[-400:], val_labels[-400:]
+        test_inputs, test_labels = shuffle_data(splitkey, test_inputs, test_labels)
+        test_inputs, test_labels = test_inputs[-400:], test_labels[-400:]
 
     steps_per_epoch = len(train_inputs) // args.bs
     print()
-    print(f"Number of training examples: {len(train_inputs)}.")
+    print(f"Number of training examples: {len(train_inputs)}, {len(train_labels)}.")
+    print(f"Number of val examples: {len(val_inputs)}, {len(val_labels)}")
+    print(f"Number of test examples: {len(test_inputs)}, {len(test_labels)}")
+    print()
     print("Steps per epoch:", steps_per_epoch)
     print("Total number of steps:", steps_per_epoch * args.epochs)
     print()
@@ -124,6 +100,7 @@ if __name__ == "__main__":
         num_layers=args.num_layers,
         dropout_rate=args.dropout,
         use_embedding=True,
+        max_seq_len=None
     )
     model = get_meta_model_fcn(model_config, args.num_classes, args.model_type)
 
@@ -133,7 +110,7 @@ if __name__ == "__main__":
     else:
         evaluator = CrossEntropyLoss(model.apply, args.num_classes)
     
-    opt = optax.adamw(learning_rate=args.lr, weight_decay=args.wd)
+    opt = optax.adamw(learning_rate=args.lr, weight_decay=args.wd/args.lr)
     updater = Updater(opt=opt, evaluator=evaluator, model_init=model.init)
     
     rng, subkey = random.split(rng)
@@ -142,13 +119,16 @@ if __name__ == "__main__":
                                     mask_individual=args.mask_single, 
                                     mask_indicators=args.mask_indicators,
                                     resample_zeromasks=False)
-    state = updater.init_params(subkey, x=utils.tree_stack(dummy_input)) #
+    state = updater.init_params(subkey, x=dummy_input) #
     
     # switch params to pretrained
     if args.pretrained_path is not None:
         state = load_pretrained_state(state, args.pretrained_path)
+        checkpoints_dir = checkpoint_dir=os.path.join('checkpoints','finetuning',args.exp,str(time.time()))
+    else:
+        checkpoints_dir=os.path.join('checkpoints','baselines',args.exp,str(time.time()))
 
-    print("Number of parameters:", utils.count_params(state.params) / 1e6, "Million")
+    print("Number of parameters:", sum(x.size for x in jax.tree_util.tree_leaves(state.params)) / 1e6, "Million")
     
     # logger
     logger = Logger(name = args.wandb_log_name,
@@ -168,10 +148,13 @@ if __name__ == "__main__":
                     log_wandb = args.use_wandb,
                     save_checkpoints=True,
                     log_interval=args.log_interval,
-                    save_interval=50,
-                    checkpoint_dir=os.path.join('checkpoints',args.exp,str(time.time())))
+                    save_interval=100,
+                    checkpoint_dir=checkpoints_dir)
     logger.init(is_save_config=True)
 
+    best = None
+    best_loss = 1000000.0
+    
     # Training loop
     for epoch in range(args.epochs):
         rng,subkey = random.split(rng)
@@ -192,30 +175,66 @@ if __name__ == "__main__":
         train_all_acc = []
         train_all_loss = []
         for it, batch in enumerate(batches):
-            batch["input"] = utils.tree_stack(batch["input"])
             state, train_metrics = updater.train_step(state, (batch['input'],batch['label']))
             logger.log(state, train_metrics)
             train_all_acc.append(train_metrics['train/acc'].item())
             train_all_loss.append(train_metrics['train/loss'].item())
-        train_metrics = {'train/acc':np.mean(train_all_acc), 'train/loss':np.mean(train_all_loss)}
+        
+        if args.num_classes==1:
+            ss_res = jnp.sum(jnp.array(train_all_acc))
+            ss_tot = jnp.sum(jnp.square(labels - jnp.mean(labels)))
+            train_metrics = {'train/r_squared': 1.0 - (ss_res / ss_tot),'train/diff':np.mean(train_all_acc), 'train/loss':np.mean(train_all_loss)}
+        else:        
+            train_metrics = {'train/acc':np.mean(train_all_acc), 'train/loss':np.mean(train_all_loss)}
             
         # Validate every epoch
-        images, labels = shuffle_data(subkey, val_inputs, val_labels)
-        images, _, _,_ = process_batch(subkey, images, 0, 
+        images, _, _,_ = process_batch(subkey, val_inputs, 0, 
                                             mask_prob=0,
                                             chunk_size=args.chunk_size,
                                             mask_individual=args.mask_single, 
                                             mask_indicators=args.mask_indicators,
                                             resample_zeromasks=False)
-        batches = data_iterator(images, labels, batchsize=32, skip_last=True)
+        batches = data_iterator(images, val_labels, batchsize=args.bs, skip_last=True)
         val_all_acc = []
         val_all_loss = []
         for it, batch in enumerate(batches):
-            batch["input"] = utils.tree_stack(batch["input"])
             state, val_metrics = updater.val_step(state, (batch['input'],batch['label']))
-            #logger.log(state, val_metrics)
             val_all_acc.append(val_metrics['val/acc'].item())
             val_all_loss.append(val_metrics['val/loss'].item())
-        val_metrics = {'val/acc':np.mean(val_all_acc), 'val/loss':np.mean(val_all_loss)}
+            
+        if args.num_classes==1:
+            ss_res = jnp.sum(jnp.array(val_all_acc))
+            ss_tot = jnp.sum(jnp.square(val_labels - jnp.mean(val_labels)))
+            val_metrics = {'val/r_squared': 1.0 - (ss_res / ss_tot),'val/diff':np.mean(val_all_acc), 'val/loss':np.mean(val_all_loss)}
+        else:    
+            val_metrics = {'val/acc':np.mean(val_all_acc), 'val/loss':np.mean(val_all_loss)}
+            
+        if val_metrics['val/loss']<best_loss:
+            best_loss = val_metrics['val/loss']
+            best = state
             
         logger.log(state, train_metrics, val_metrics)
+        
+    ## TEST
+    images, _, _,_ = process_batch(subkey, test_inputs, 0, 
+                                        mask_prob=0,
+                                        chunk_size=args.chunk_size,
+                                        mask_individual=args.mask_single, 
+                                        mask_indicators=args.mask_indicators,
+                                        resample_zeromasks=False)
+    batches = data_iterator(images, test_labels, batchsize=args.bs, skip_last=True)
+    test_all_acc = []
+    test_all_loss = []
+    for it, batch in enumerate(batches):
+        state, test_metrics = updater.val_step(best, (batch['input'],batch['label']))
+        test_all_acc.append(test_metrics['val/acc'].item())
+        test_all_loss.append(test_metrics['val/loss'].item())
+        
+    if args.num_classes==1:
+        ss_res = jnp.sum(jnp.array(test_all_acc))
+        ss_tot = jnp.sum(jnp.square(test_labels - jnp.mean(test_labels)))
+        test_metrics = {'test/r_squared': 1.0 - (ss_res / ss_tot),'test/diff':np.mean(test_all_acc), 'test/loss':np.mean(test_all_loss)}
+    else:    
+        test_metrics = {'test/acc':np.mean(test_all_acc), 'test/loss':np.mean(test_all_loss)}
+    print("Test results")
+    logger.log(state, test_metrics)

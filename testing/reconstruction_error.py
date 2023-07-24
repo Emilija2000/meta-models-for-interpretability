@@ -1,10 +1,6 @@
 import argparse
-import functools
 import jax.numpy as jnp
-import matplotlib.pyplot as plt
-from jax.tree_util import tree_flatten
-from jax import random,vmap,nn
-import numpy as np
+from jax import random
 
 # meta model part
 from model_zoo_jax import load_nets
@@ -88,19 +84,29 @@ if __name__=='__main__':
     test_iterator = data_iterator(test_in, test_out, test_pos, batchsize=args.bs,skip_last=True)
     
     # check reconstruction r2 for training and test sets
-    r2_train = []
+    predictions = None
     for masked_ins,target,positions in train_iterator:
         
         predicted = model.apply(params, subkey, masked_ins, False)
-        l = loss_fcn.r2_score(predicted, target,positions)
-        r2_train.append(l)
-    print('R2 on training dataset: ',np.mean(r2_train))
+        if predictions is None:
+            predictions = predicted
+        else:
+            predictions = jnp.concatenate([predictions, predicted],axis=0)
+    print(predictions.shape)
+    print(train_out.shape)
+        
+    print('R2 on training dataset: ',loss_fcn.r2_score(predictions, train_out,train_pos))
     
-    r2_test = []
+    predictions = None
     for masked_ins,target,positions in test_iterator:
         
         predicted = model.apply(params, subkey, masked_ins, False)
-        l = loss_fcn.r2_score(predicted, target,positions)
-        r2_test.append(l)
-    print('R2 on testing dataset: ',np.mean(r2_test))
+        if predictions is None:
+            predictions = predicted
+        else:
+            predictions = jnp.concatenate([predictions, predicted],axis=0)
+    print(predictions.shape)
+    print(train_out.shape)
         
+    print('R2 on test dataset: ',loss_fcn.r2_score(predictions, test_out,test_pos))
+    

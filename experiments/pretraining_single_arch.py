@@ -6,15 +6,20 @@ import optax
 from jax.typing import ArrayLike
 from typing import Tuple, List, Iterator
 import time
+from math import ceil
 
-from meta_transformer import utils 
+from jax.tree_util import tree_flatten
+from collections import defaultdict
+
 from augmentations import augment_batch
-from model_zoo_jax import load_nets, shuffle_data
+from model_zoo_jax import load_nets, shuffle_data, load_data
+from torchload import load_modelzoo
 
-from meta_transformer.meta_model import create_meta_model
-from meta_transformer.meta_model import MetaModelConfig as ModelConfig
+from model.meta_model import create_meta_model
+from model.meta_model import MetaModelConfig as ModelConfig
 
 from pretraining import MWMLossMSE, MWMLossMseNormalized, Updater, Logger, process_batch
+from finetuning import load_pretrained_state
 
 import os
 import argparse
@@ -78,6 +83,27 @@ def learning_rate_schedule(warmup_epochs, total_epochs, peak_lr, steps_per_epoch
         return lr
     return schedule
 
+def calculate_layer_stats(zoo, chunk_size):
+    # Prepare a dictionary to store all parameter values for each layer
+    layer_stats = defaultdict(list)
+    layer_num_chunks = []
+    flag=True
+    #print("Model zoo layer shapes")
+    for model_params in zoo:
+        leaves, _ = jax.tree_util.tree_flatten(model_params)
+        for leaf_id, leaf in enumerate(leaves):
+            layer_stats[leaf_id].append(jnp.std(leaf.flatten()))
+            if flag:
+                original_length = len(leaf.flatten())
+                layer_num_chunks.append(int(ceil(original_length/chunk_size)))
+                #print(leaf_id, leaf.flatten().shape, layer_num_chunks[-1])
+        flag = False
+    # Calculate statistics for each layer
+    avg_stats = []
+    for layer_id, values in layer_stats.items():
+        avg_stats.append(jnp.mean(jnp.array(values)))
+    return jnp.square(jnp.array(avg_stats)), layer_num_chunks 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Training run')
     # training parameters
@@ -97,6 +123,7 @@ if __name__ == "__main__":
     #parser.add_argument('--mask_indicators',type=bool, default=True,help='Include binary mask indicators to meta-model chunked input')
     parser.add_argument('--include_nonmasked_loss',action='store_true')
     # data
+    parser.add_argument('--dataset_type',type=str,help='My dataset or external torch dataset. Values:myzoo or torchzoo',default='myzoo')
     parser.add_argument('--data_dir',type=str,default='/rds/user/ed614/hpc-work/model_zoo_datasets/mnist_smallCNN_fixed_zoo')
     parser.add_argument('--num_checkpoints',type=int,default=1)
     parser.add_argument('--num_networks',type=int,default=None)
@@ -113,6 +140,8 @@ if __name__ == "__main__":
     parser.add_argument('--log_interval',type=int, default=50)
     parser.add_argument('--seed',type=int, help='PRNG key seed',default=42)
     parser.add_argument('--exp', type=str, default="sweep")
+    # continued training
+    parser.add_argument('--pretrained_path',type=str,default=None)
     args = parser.parse_args()
     
     rng = random.PRNGKey(args.seed)
@@ -123,8 +152,10 @@ if __name__ == "__main__":
         MASK_TOKEN=0
     else:
         #MASK_TOKEN = random.uniform(subkey,(args.chunk_size,),minval=-100, maxval=100)
+        #MASK_TOKEN = jnp.zeros((args.chunk_size+4,))#TODO: hardcoded +4
         MASK_TOKEN = jnp.zeros((args.chunk_size,))
-
+    
+    '''    
     # Load model zoo checkpoints
     print(f"Loading model zoo: {args.data_dir}")
     inputs, labels = load_nets(n=args.num_networks, 
@@ -133,7 +164,7 @@ if __name__ == "__main__":
                                    num_checkpoints=args.num_checkpoints)
     
     #unpreprocess = preprocessing.get_unpreprocess(inputs[0], args.chunk_size)
-    
+    print("Loaded")
     # Filter (high variance and poorly trained networks)
     if args.filter:
         inputs = filter_poorly_trained(inputs, labels['test/acc'])
@@ -142,9 +173,26 @@ if __name__ == "__main__":
     # Shuffle checkpoints before splitting
     rng, subkey = random.split(rng)
     filtered_inputs, _ = shuffle_data(subkey,inputs,np.zeros(len(inputs)),chunks=args.num_checkpoints)
-    
+    print("Shuffled")
     train_inputs, val_inputs = split_data(filtered_inputs)
-    val_data = utils.tree_stack(val_inputs)
+    '''
+    
+    # Load data
+    if args.dataset_type == 'myzoo':
+        rng,subkey = random.split()
+        train_inputs, _, val_inputs, _, test_inputs, _ = load_data(subkey, args.data_dir, None,args.num_networks,args.num_checkpoints, is_filter=args.filter)
+    else:
+        train_inputs, _, val_inputs, _, test_inputs, _ = load_modelzoo(args.data_dir, None, epochs=list(range(0,51,50//args.num_checkpoints))[1:])
+
+        # Keep a subset for finetuning/baseline
+        splitkey = random.PRNGKey(123)
+        train_inputs, _ = shuffle_data(splitkey, train_inputs, jnp.ones(len(train_inputs)))
+        train_inputs = train_inputs[:6000]
+        val_inputs, _ = shuffle_data(splitkey, val_inputs, jnp.ones(len(val_inputs)))
+        val_inputs =  val_inputs[:1000]
+        test_inputs, _ = shuffle_data(splitkey, test_inputs, jnp.ones(len(test_inputs)))
+        test_inputs = test_inputs[:500]
+
 
     steps_per_epoch = len(train_inputs) // args.bs
     print()
@@ -153,17 +201,23 @@ if __name__ == "__main__":
     print("Total number of steps:", steps_per_epoch * args.epochs)
     print()
     
+    # layer stats
+    layer_vars, chunks_per_layer = calculate_layer_stats(train_inputs, args.chunk_size)
+    print(layer_vars, chunks_per_layer)
+    chunk_vars = [v for v, c in zip(layer_vars, chunks_per_layer) for i in range(c)]
+    chunk_vars = jnp.array(chunk_vars)
     # calculating chunk stats - loss normalization
-    chunked_ins,_,_,_ = process_batch(random.PRNGKey(0), train_inputs[:1000], 0,
-                                    mask_prob=0, chunk_size=args.chunk_size, 
-                                    mask_individual=args.mask_single, 
-                                    mask_indicators=False,resample_zeromasks=False)
-    chunked_ins=jnp.transpose(chunked_ins,axes=[1,0,2])
+    #chunked_ins,_,_,_ = process_batch(random.PRNGKey(0), train_inputs[:1000], 0,
+    #                                mask_prob=0, chunk_size=args.chunk_size, 
+    #                                mask_individual=args.mask_single, 
+    #                                mask_indicators=False,resample_zeromasks=False)
+    #chunked_ins=jnp.transpose(chunked_ins,axes=[1,0,2])
     #means = jnp.mean(jnp.reshape(chunked_ins,(chunked_ins.shape[0],-1)),axis=1)
-    chunk_vars = jnp.std(jnp.reshape(chunked_ins,(chunked_ins.shape[0],-1)),axis=1)
+    #chunk_vars = jnp.std(jnp.reshape(chunked_ins,(chunked_ins.shape[0],-1)),axis=1)
     #chunk_vars = jnp.ones(chunk_vars.shape)
-    chunk_vars = jnp.square(chunk_vars)
+    #chunk_vars = jnp.square(chunk_vars)
     print("Chunk variances calculated\n")
+    #print(chunk_vars)
 
     # model
     model_config = ModelConfig(
@@ -181,16 +235,19 @@ if __name__ == "__main__":
     loss_fcn = MWMLossMseNormalized(model.apply, non_masked=args.include_nonmasked_loss)
     #loss_fcn = MWMLossMSE(model.apply, non_masked=args.include_nonmasked_loss)
     #loss_fcn = MWMLossCosine(model.apply, non_masked=args.include_nonmasked_loss)
-    opt = optax.adamw(learning_rate=lr_schedule, weight_decay=args.wd)
+    opt = optax.adamw(learning_rate=lr_schedule, weight_decay=args.wd/args.lr)
     updater = Updater(opt=opt, evaluator=loss_fcn, model_init=model.init)
     
     rng, subkey = random.split(rng)
         
-    dummy_input,_,_,_ = process_batch(jax.random.PRNGKey(0), train_inputs[:args.bs], 0,mask_prob=args.mask_prob, chunk_size=args.chunk_size, 
+    dummy_input,_,_,_ = process_batch(jax.random.PRNGKey(0), train_inputs[:args.bs], 0,mask_prob=args.mask_prob, chunk_size=args.chunk_size,
                                     mask_individual=args.mask_single, mask_indicators=args.mask_indicators)
-    state = updater.init_params(subkey, x=utils.tree_stack(dummy_input)) #
+    state = updater.init_params(subkey, x=dummy_input) #
+    
+    if args.pretrained_path is not None:
+        state = load_pretrained_state(state, args.pretrained_path)
 
-    print("Number of parameters:", utils.count_params(state.params) / 1e6, "Million")
+    print("Number of parameters:", sum(x.size for x in jax.tree_util.tree_leaves(state.params)) / 1e6, "Million")
     
     # logger
     logger = Logger(name = args.wandb_log_name,
@@ -206,7 +263,8 @@ if __name__ == "__main__":
                     "model_size":args.model_size,
                     "chunk_size":args.chunk_size,
                     "num_layers":args.num_layers,
-                    "augment":args.augment},
+                    "augment":args.augment,
+                    "num_networks":args.num_networks},
                     log_wandb = args.use_wandb,
                     save_checkpoints=True,
                     save_interval=10,
@@ -234,26 +292,46 @@ if __name__ == "__main__":
 
         train_all_loss = []
         for it, batch in enumerate(batches):
-            #batch["input"] = utils.tree_stack(batch["input"])
             state, train_metrics = updater.train_step(state, (batch['masked_input'],batch['input'],batch['position'],batch['non_position'],batch['variances']))
-            #logger.log(state, train_metrics)
+            logger.log(state, train_metrics)
             train_all_loss.append(train_metrics['train/loss'].item())
-        train_metrics = {'train/loss':np.mean(train_all_loss)}
+        train_metrics = {'train/avg_loss':np.mean(train_all_loss)}
             
         # Validate every epoch
         rng, subkey = random.split(rng)
         masked_ins, masked_labels, positions,non_masked_positions = process_batch(subkey, val_inputs, MASK_TOKEN, 
                                                       mask_prob=args.mask_prob,
-                                                      chunk_size=args.chunk_size,
+                                                      chunk_size=args.chunk_size, 
                                                       mask_individual=args.mask_single, 
                                                       mask_indicators=args.mask_indicators)
         batches = data_iterator(masked_ins, masked_labels, positions,non_masked_positions, batchsize=args.bs, skip_last=True,variances=chunk_vars)
         val_all_loss = []
         for it, batch in enumerate(batches):
-            #batch["input"] = utils.tree_stack(batch["input"])
             state, val_metrics = updater.val_step(state, (batch['masked_input'],batch['input'],batch['position'],batch['non_position'],batch['variances']))
             #logger.log(state, val_metrics)
             val_all_loss.append(val_metrics['val/loss'].item())
-        val_metrics = {'val/loss':np.mean(val_all_loss)}
+        val_metrics = {'val/avg_loss':np.mean(val_all_loss)}
             
         logger.log(state, train_metrics, val_metrics)
+        
+    # Evaluate reconstruction error on test set
+    test_in, test_out, test_pos,_ = process_batch(subkey, test_inputs, mask_token=0,
+                                                    mask_prob=args.mask_prob, 
+                                                    chunk_size=args.chunk_size, 
+                                                    mask_individual=args.mask_single, 
+                                                    mask_indicators=args.mask_indicators)
+    test_iterator = data_iterator(test_in, test_out, test_pos, batchsize=args.bs,skip_last=True)
+    predictions = None
+    for masked_ins,target,positions in test_iterator:
+        
+        predicted = model.apply(state.params, subkey, masked_ins, False)
+        if predictions is None:
+            predictions = predicted
+        else:
+            predictions = jnp.concatenate([predictions, predicted],axis=0)
+       
+    loss_fcn = MWMLossMSE(model.apply, non_masked=False) 
+    r2 = loss_fcn.r2_score(predictions, test_out,test_pos)
+    print('R2 on test dataset: ',r2)
+    logger.log(state,{'test/r2':r2.item()})
+    

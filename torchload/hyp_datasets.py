@@ -11,14 +11,18 @@ import numpy as np
 import os
 
 
-def load_csv_gz_as_dict(filename):
+def load_csv_gz_as_dict(filename,num=None):
     with gzip.open(filename, 'rt') as f:
         reader = csv.reader(f)
         headers = next(reader)  # Get column names from first row
         columns = {header: [] for header in headers}  # Initialize a dict with column names
 
         numerical_keys = []
+        i=0
         for row in reader:
+            if num is not None and i==num:
+                break
+            i+=1
             for header, value in zip(headers, row):
                 try:
                     columns[header].append(float(value)) # convert to float before appending
@@ -63,20 +67,28 @@ def vector_to_params(vector, shapes):
             params[layer_name][param_name] = jnp.reshape(vector[start:end], shape)
     return params
 
-def read_params(params_path, shapes_path):
+def read_params(params_path, shapes_path, num=None):
     '''Read NN parameter list'''
     param_shapes = parse_params_file(shapes_path)
     data = np.load(params_path)
-    params_list = [vector_to_params(vector,param_shapes) for vector in data]
+    if num==None:
+        params_list = [vector_to_params(vector,param_shapes) for vector in data]
+    else:
+        params_list=[]
+        for i,vector in enumerate(data):
+            if i==num:
+                break
+            params_list.append(vector_to_params(vector,param_shapes))
     return params_list
 
-def load_dataset(dataset_path):
+def load_dataset(dataset_path, num=None):
     params_list = read_params(
         params_path=os.path.join(dataset_path,'weights.npy'),
-        shapes_path=os.path.join(dataset_path,'layout.csv')
+        shapes_path=os.path.join(dataset_path,'layout.csv'),
+        num=num
         )
     
-    labels = load_csv_gz_as_dict(os.path.join(dataset_path,'metrics.csv.gz'))
+    labels = load_csv_gz_as_dict(os.path.join(dataset_path,'metrics.csv.gz'), num=num)
     return params_list,labels
     
     
