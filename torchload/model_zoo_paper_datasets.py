@@ -118,7 +118,7 @@ def torch_to_haiku(pytorch_params):
     Returns:
         haiku_params (dict): Haiku parameters.
     """
-        haiku_params = defaultdict()
+    haiku_params = defaultdict()
     for k, v in pytorch_params.items():
         module, param_type = k.rsplit('.',1)
         module_name, idx = module.split('module_list.',1)
