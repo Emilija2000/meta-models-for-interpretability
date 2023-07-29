@@ -2,6 +2,7 @@
 Loading model zoos published in: https://arxiv.org/pdf/2209.14764.pdf
 Credit for zoo definition and loading: https://github.com/ModelZoos/ModelZooDataset/tree/main
 '''
+from collections import defaultdict
 import jax.numpy as jnp
 import numpy as np
 import torch
@@ -117,10 +118,12 @@ def torch_to_haiku(pytorch_params):
     Returns:
         haiku_params (dict): Haiku parameters.
     """
-    haiku_params = {}
+        haiku_params = defaultdict()
     for k, v in pytorch_params.items():
         module, param_type = k.rsplit('.',1)
         module_name, idx = module.split('module_list.',1)
+        if int(idx) not in [0,3,6,9,11]:
+            continue
 
         if int(idx) in [0, 3, 6]:  # For conv2d layers
             layer_name = f'conv2d_{idx}'
