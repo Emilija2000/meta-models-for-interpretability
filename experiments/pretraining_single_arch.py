@@ -108,27 +108,28 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Training run')
     # training parameters
     parser.add_argument('--lr', type=float, help='Learning rate', default=5e-5)
-    parser.add_argument('--wd', type=float, help='Weight decay', default=1e-3)
-    parser.add_argument('--dropout',type=float,help='Meta-transformer dropout', default=0.1)
+    parser.add_argument('--wd', type=float, help='Weight decay', default=0.0)
+    parser.add_argument('--dropout',type=float,help='Meta-transformer dropout', default=0.0)
     parser.add_argument('--bs', type=int, help='Batch size', default=32)
-    parser.add_argument('--epochs', type=int, help='Number of epochs', default=500)
+    parser.add_argument('--epochs', type=int, help='Number of epochs', default=6000)
     # meta-model
     parser.add_argument('--model_size',type=int,help='MetaModel model_size parameter',default=4*32)
     parser.add_argument('--num_layers',type=int,help='num of transformer layers',default=12)
     parser.add_argument('--num_heads',type=int,help='num of MHA heads',default=8)
-    parser.add_argument('--chunk_size',type=int,help='meta model chunk size',default=128)
+    parser.add_argument('--chunk_size',type=int,help='meta model chunk size',default=64)
     parser.add_argument('--mask_prob',type=float,default=0.2)
     parser.add_argument('--mask_single',action='store_true',help='Mask each weight individually')
     parser.add_argument('--mask_indicators',action='store_true',help='Include binary mask indicators to meta-model chunked input')
     #parser.add_argument('--mask_indicators',type=bool, default=True,help='Include binary mask indicators to meta-model chunked input')
     parser.add_argument('--include_nonmasked_loss',action='store_true')
+    #parser.add_argument('--include_nonmasked_loss',type=bool,default=False)
     # data
-    parser.add_argument('--dataset_type',type=str,help='My dataset or external torch dataset. Values:myzoo or torchzoo',default='myzoo')
-    parser.add_argument('--data_dir',type=str,default='/rds/user/ed614/hpc-work/model_zoo_datasets/mnist_smallCNN_fixed_zoo')
+    parser.add_argument('--dataset_type',type=str,help='My dataset or external torch dataset. Values:myzoo or torchzoo',default='torchzoo')
+    parser.add_argument('--data_dir',type=str,default='/rds/user/ed614/hpc-work/model_zoo_datasets/mnist_hyp_rand/tune_zoo_mnist_hyperparameter_10_random_seeds')
     parser.add_argument('--num_checkpoints',type=int,default=1)
     parser.add_argument('--num_networks',type=int,default=None)
     parser.add_argument('--filter', action='store_true', help='Filter out high variance NN weights')
-    #parser.add_argument('--filter', type=bool, default=True, help='Filter out high variance NN weights')
+    #parser.add_argument('--filter', type=bool, default=False, help='Filter out high variance NN weights')
     # augmentations
     parser.add_argument('--augment', action='store_true', help='Use permutation augmentation')
     #parser.add_argument('--augment', type=bool, default=True, help='Use permutation augmentation')
@@ -142,6 +143,9 @@ if __name__ == "__main__":
     parser.add_argument('--exp', type=str, default="sweep")
     # continued training
     parser.add_argument('--pretrained_path',type=str,default=None)
+    # type of chunking
+    parser.add_argument('--notlayerwise',action='store_true', help='turn off layerwise chunking')
+    parser.add_argument('--layerind',action='store_true',help='indicators for layer type')
     args = parser.parse_args()
     
     rng = random.PRNGKey(args.seed)
@@ -152,8 +156,10 @@ if __name__ == "__main__":
         MASK_TOKEN=0
     else:
         #MASK_TOKEN = random.uniform(subkey,(args.chunk_size,),minval=-100, maxval=100)
-        #MASK_TOKEN = jnp.zeros((args.chunk_size+4,))#TODO: hardcoded +4
-        MASK_TOKEN = jnp.zeros((args.chunk_size,))
+        if args.layerind:
+            MASK_TOKEN = jnp.zeros((args.chunk_size+4,))#TODO: hardcoded +4
+        else:
+            MASK_TOKEN = jnp.zeros((args.chunk_size,))
     
     '''    
     # Load model zoo checkpoints
@@ -187,11 +193,14 @@ if __name__ == "__main__":
         # Keep a subset for finetuning/baseline
         splitkey = random.PRNGKey(123)
         train_inputs, _ = shuffle_data(splitkey, train_inputs, jnp.ones(len(train_inputs)))
-        train_inputs = train_inputs[:6000]
+        train_inputs = train_inputs[:int(0.8*len(train_inputs))] #6000 
         val_inputs, _ = shuffle_data(splitkey, val_inputs, jnp.ones(len(val_inputs)))
-        val_inputs =  val_inputs[:1000]
+        val_inputs =  val_inputs[:int(0.65*len(val_inputs))] #1000
         test_inputs, _ = shuffle_data(splitkey, test_inputs, jnp.ones(len(test_inputs)))
-        test_inputs = test_inputs[:500]
+        test_inputs = test_inputs[:int(0.65*len(test_inputs))] #500
+        
+        if args.num_networks is not None and args.num_networks < len(train_inputs):
+            train_inputs = train_inputs[:args.num_networks]
 
 
     steps_per_epoch = len(train_inputs) // args.bs
@@ -232,8 +241,10 @@ if __name__ == "__main__":
 
     # Initialization
     model = create_meta_model(model_config)
-    loss_fcn = MWMLossMseNormalized(model.apply, non_masked=args.include_nonmasked_loss)
-    #loss_fcn = MWMLossMSE(model.apply, non_masked=args.include_nonmasked_loss)
+    if args.notlayerwise:
+        loss_fcn = MWMLossMSE(model.apply, non_masked=args.include_nonmasked_loss)
+    else:
+        loss_fcn = MWMLossMseNormalized(model.apply, non_masked=args.include_nonmasked_loss)
     #loss_fcn = MWMLossCosine(model.apply, non_masked=args.include_nonmasked_loss)
     opt = optax.adamw(learning_rate=lr_schedule, weight_decay=args.wd/args.lr)
     updater = Updater(opt=opt, evaluator=loss_fcn, model_init=model.init)
@@ -241,7 +252,9 @@ if __name__ == "__main__":
     rng, subkey = random.split(rng)
         
     dummy_input,_,_,_ = process_batch(jax.random.PRNGKey(0), train_inputs[:args.bs], 0,mask_prob=args.mask_prob, chunk_size=args.chunk_size,
-                                    mask_individual=args.mask_single, mask_indicators=args.mask_indicators)
+                                    mask_individual=args.mask_single, mask_indicators=args.mask_indicators,
+                                    layerwise=not(args.notlayerwise),
+                                    layerind=args.layerind)
     state = updater.init_params(subkey, x=dummy_input) #
     
     if args.pretrained_path is not None:
@@ -264,7 +277,8 @@ if __name__ == "__main__":
                     "chunk_size":args.chunk_size,
                     "num_layers":args.num_layers,
                     "augment":args.augment,
-                    "num_networks":args.num_networks},
+                    "num_networks":args.num_networks,
+                    "mask_prob":args.mask_prob},
                     log_wandb = args.use_wandb,
                     save_checkpoints=True,
                     save_interval=10,
@@ -287,7 +301,9 @@ if __name__ == "__main__":
                                                       mask_prob=args.mask_prob,
                                                       chunk_size=args.chunk_size,
                                                       mask_individual=args.mask_single, 
-                                                      mask_indicators=args.mask_indicators)
+                                                      mask_indicators=args.mask_indicators,
+                                                      layerwise=not(args.notlayerwise),
+                                                      layerind=args.layerind)
         batches = data_iterator(masked_ins, masked_labels, positions,non_masked_positions, batchsize=args.bs, skip_last=True,variances=chunk_vars)
 
         train_all_loss = []
@@ -303,7 +319,9 @@ if __name__ == "__main__":
                                                       mask_prob=args.mask_prob,
                                                       chunk_size=args.chunk_size, 
                                                       mask_individual=args.mask_single, 
-                                                      mask_indicators=args.mask_indicators)
+                                                      mask_indicators=args.mask_indicators,
+                                                      layerwise=not(args.notlayerwise),
+                                                      layerind=args.layerind)
         batches = data_iterator(masked_ins, masked_labels, positions,non_masked_positions, batchsize=args.bs, skip_last=True,variances=chunk_vars)
         val_all_loss = []
         for it, batch in enumerate(batches):
@@ -315,12 +333,14 @@ if __name__ == "__main__":
         logger.log(state, train_metrics, val_metrics)
         
     # Evaluate reconstruction error on test set
-    test_in, test_out, test_pos,_ = process_batch(subkey, test_inputs, mask_token=0,
+    test_in, test_out, test_pos,non_pos = process_batch(subkey, test_inputs, mask_token=0,
                                                     mask_prob=args.mask_prob, 
                                                     chunk_size=args.chunk_size, 
                                                     mask_individual=args.mask_single, 
-                                                    mask_indicators=args.mask_indicators)
-    test_iterator = data_iterator(test_in, test_out, test_pos, batchsize=args.bs,skip_last=True)
+                                                    mask_indicators=args.mask_indicators,
+                                                    layerwise=not(args.notlayerwise),
+                                                    layerind=args.layerind)
+    test_iterator = data_iterator(test_in, test_out, test_pos,non_pos, batchsize=args.bs,skip_last=True)
     predictions = None
     for masked_ins,target,positions in test_iterator:
         
