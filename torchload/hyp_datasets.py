@@ -12,6 +12,11 @@ import os
 
 
 def load_csv_gz_as_dict(filename,num=None):
+    def encode_discrete_properties(properties):
+        # First, map the distinct values to unique indices
+        unique_properties, encoded_properties = np.unique(properties, return_inverse=True)
+        return encoded_properties
+    
     with gzip.open(filename, 'rt') as f:
         reader = csv.reader(f)
         headers = next(reader)  # Get column names from first row
@@ -34,7 +39,9 @@ def load_csv_gz_as_dict(filename,num=None):
     for key, values in columns.items():
         if key in numerical_keys:
             columns[key] = jnp.array(values)
-
+        else:
+            columns[key] = jnp.array(encode_discrete_properties(values))
+            
     return columns
 
 def parse_params_file(filename):
