@@ -137,10 +137,14 @@ class MetaModelWithAux(hk.Module):
         _, seq_len, _ = inputs.shape
 
         # Add positional embeddings.
-        init = hk.initializers.TruncatedNormal(stddev=0.02)
-        positional_embeddings = hk.get_parameter(
-            'positional_embeddings', [self.max_seq_len, self.model_size], init=init)
-        inputs = inputs + positional_embeddings[:seq_len, :] 
+        if self.max_seq_len == None:
+            init = hk.initializers.TruncatedNormal(stddev=0.02)
+            positional_embeddings = hk.get_parameter('positional_embeddings', [seq_len, self.model_size], init=init)
+        else:
+            init = hk.initializers.TruncatedNormal(stddev=0.02)
+            positional_embeddings = hk.get_parameter('positional_embeddings', [self.max_seq_len, self.model_size], init=init)
+        
+        inputs = inputs + jnp.tile(positional_embeddings[:seq_len, :],(inputs.shape[0],1,1))
 
         # Run the transformer over the inputs.
         outputs,aux = self.transformer(
