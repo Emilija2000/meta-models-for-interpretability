@@ -16,7 +16,7 @@ from finetuning import load_pretrained_state, get_meta_model_fcn
 # data
 from model_zoo_jax import load_data, shuffle_data, CrossEntropyLoss, MSELoss, Updater
 from torchload import load_modelzoo
-from augmentations import augment_batch
+from augmentations import augment_batch,permute_last_layer
 
 from pretraining import Logger, process_batch
 
@@ -70,8 +70,8 @@ if __name__ == "__main__":
 
     # Load data
     if args.dataset_type == 'myzoo':
-        rng,subkey = random.split()
-        train_inputs, train_labels, val_inputs, val_labels, test_inputs, test_labels = load_data(subkey, args.data_dir, args.task,args.num_networks,args.num_checkpoints, is_filter=args.filter)
+        splitkey = random.PRNGKey(123)
+        train_inputs, train_labels, val_inputs, val_labels, test_inputs, test_labels = load_data(splitkey, args.data_dir, args.task,args.num_networks,args.num_checkpoints, is_filter=args.filter)
     else:
         train_inputs, train_labels, val_inputs, val_labels, test_inputs, test_labels = load_modelzoo(args.data_dir, args.task, epochs=list(range(0,51,50//args.num_checkpoints))[1:])
 
@@ -83,6 +83,18 @@ if __name__ == "__main__":
         val_inputs, val_labels =  val_inputs[-400:], val_labels[-400:]
         test_inputs, test_labels = shuffle_data(splitkey, test_inputs, test_labels)
         test_inputs, test_labels = test_inputs[-400:], test_labels[-400:]
+
+    #if args.task == 'class_dropped' and args.augment:
+    #    rng, subkey = jax.random.split(rng)
+    #    train_inputs = permute_last_layer(subkey,train_inputs)
+    #    rng, subkey = jax.random.split(rng)
+    #    val_inputs = permute_last_layer(subkey,val_inputs)
+    #    rng, subkey = jax.random.split(rng)
+    #    test_inputs = permute_last_layer(subkey,test_inputs)
+    
+    #if args.exp=='augmentornot_10':
+    #    rng,subkey=jax.random.split(rng)
+    #    train_inputs,train_labels = augment_batch(subkey,train_inputs,train_labels,num_p=args.num_augment,keep_original=True)
 
     steps_per_epoch = len(train_inputs) // args.bs
     print()
@@ -144,11 +156,12 @@ if __name__ == "__main__":
                         "model_type": args.model_type,
                         "model_size":args.model_size,
                         "num_layers":args.num_layers,
-                        "augment":args.augment},
+                        "augment":args.augment,
+                        "num_networks_train":len(train_inputs)},
                     log_wandb = args.use_wandb,
                     save_checkpoints=True,
                     log_interval=args.log_interval,
-                    save_interval=100,
+                    save_interval=10,
                     checkpoint_dir=checkpoints_dir)
     logger.init(is_save_config=True)
 
@@ -238,3 +251,4 @@ if __name__ == "__main__":
         test_metrics = {'test/acc':np.mean(test_all_acc), 'test/loss':np.mean(test_all_loss)}
     print("Test results")
     logger.log(state, test_metrics)
+    print(test_metrics)
