@@ -224,9 +224,11 @@ if __name__ == "__main__":
             
         if val_metrics['val/loss']<best_loss:
             best_loss = val_metrics['val/loss']
-            best = state
+            best = state.copy()
             
         logger.log(state, train_metrics, val_metrics)
+        
+    logger.save_checkpoint(best)
         
     ## TEST
     images, _, _,_ = process_batch(subkey, test_inputs, 0, 

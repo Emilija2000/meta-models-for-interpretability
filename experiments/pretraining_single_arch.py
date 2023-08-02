@@ -299,6 +299,8 @@ if __name__ == "__main__":
     logger.init(is_save_config=True)
 
     # Training loop
+    best_loss = 100000
+    best = None
     start = time.time()
     max_runtime_reached = False
     for epoch in range(args.epochs):
@@ -352,8 +354,14 @@ if __name__ == "__main__":
             
         logger.log(state, train_metrics, val_metrics)
         
+        if val_metrics['val/loss'] <best_loss:
+            best_loss = val_metrics['val/loss']
+            best = state.copy()
+        
         if max_runtime_reached:
             break
+        
+    logger.save_checkpoint(best, train_metrics, val_metrics)
         
     # Evaluate reconstruction error on test set
     test_in, test_out, test_pos,non_pos = process_batch(subkey, test_inputs, mask_token=0,

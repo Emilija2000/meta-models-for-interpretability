@@ -14,7 +14,7 @@ from model.meta_model import MetaModelConfig as ModelConfig
 from model_zoo_jax import shuffle_data, CrossEntropyLoss, MSELoss, MSLELoss, Updater
 
 from finetuning import load_pretrained_state, get_meta_model_fcn
-from pretraining import Logger, process_batch
+from pretraining import Logger, process_batch, TrainState
 
 from torchload import load_dataset
 from chunking import preprocessing
@@ -178,6 +178,9 @@ if __name__ == "__main__":
     print('chunking val')
     val_inputs = preprocessing.batch_process_layerwise(val_inputs,args.chunk_size)
     
+    best_val = 100000
+    best_model = None
+    
     # Training loop
     for epoch in range(args.epochs):
         print('augment and shuffle')
@@ -222,6 +225,12 @@ if __name__ == "__main__":
         val_metrics = {'val/r_squared': 1.0 - (ss_res / ss_tot),'val/acc':np.mean(val_all_acc), 'val/loss':np.mean(val_all_loss)}
             
         logger.log(state, train_metrics, val_metrics)
+        
+        if best_val > val_metrics['val/loss']:
+            best_val = val_metrics['val/loss']
+            best_model = state.params.copy()
+            
+    logger.save_checkpoint(TrainState(step=state.step,rng=state.rng,opt_state=state.opt_state,params=best_model,model_state=state.model_state))
         
     batches = data_iterator(test_inputs, test_labels, batchsize=args.bs, skip_last=True)
     val_all_acc = []
