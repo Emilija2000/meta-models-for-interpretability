@@ -356,7 +356,7 @@ if __name__ == "__main__":
         
         if val_metrics['val/loss'] <best_loss:
             best_loss = val_metrics['val/loss']
-            best = state.copy()
+            best = state
         
         if max_runtime_reached:
             break

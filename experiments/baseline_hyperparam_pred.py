@@ -230,7 +230,8 @@ if __name__ == "__main__":
             best_val = val_metrics['val/loss']
             best_model = state.params.copy()
             
-    logger.save_checkpoint(TrainState(step=state.step,rng=state.rng,opt_state=state.opt_state,params=best_model,model_state=state.model_state))
+    logger.save_checkpoint(TrainState(step=state.step,rng=state.rng,opt_state=state.opt_state,params=best_model,model_state=state.model_state),
+                           train_metrics, val_metrics)
         
     batches = data_iterator(test_inputs, test_labels, batchsize=args.bs, skip_last=True)
     val_all_acc = []
