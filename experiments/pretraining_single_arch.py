@@ -68,7 +68,7 @@ def data_iterator(masked_inputs:jnp.ndarray, inputs: jnp.ndarray, positions:jnp.
                 variances=variances)
         
 
-def learning_rate_schedule(warmup_epochs, total_epochs, peak_lr, steps_per_epoch, decay_epochs=[0.5, 0.75], decay_factor=0.1):
+def learning_rate_schedule(warmup_epochs, total_epochs, peak_lr, steps_per_epoch, decay_epochs=[0.4, 0.6, 0.8], decay_factor=0.2):
     """Custom learning rate schedule with warmup and decay."""
     def schedule(step):
         # Convert step to epoch
@@ -112,6 +112,9 @@ if __name__ == "__main__":
     parser.add_argument('--dropout',type=float,help='Meta-transformer dropout', default=0.0)
     parser.add_argument('--bs', type=int, help='Batch size', default=32)
     parser.add_argument('--epochs', type=int, help='Number of epochs', default=6000)
+    parser.add_argument('--adam_b1', type=float, help='Learning rate', default=0.1)
+    parser.add_argument('--adam_b2', type=float, help='Weight decay', default=0.001)
+    parser.add_argument('--adam_eps', type=float, help='Weight decay', default=1e-8)
     # meta-model
     parser.add_argument('--model_size',type=int,help='MetaModel model_size parameter',default=4*32)
     parser.add_argument('--num_layers',type=int,help='num of transformer layers',default=12)
@@ -119,24 +122,24 @@ if __name__ == "__main__":
     parser.add_argument('--chunk_size',type=int,help='meta model chunk size',default=64)
     parser.add_argument('--mask_prob',type=float,default=0.2)
     parser.add_argument('--mask_single',action='store_true',help='Mask each weight individually')
-    parser.add_argument('--mask_indicators',action='store_true',help='Include binary mask indicators to meta-model chunked input')
-    #parser.add_argument('--mask_indicators',type=bool, default=True,help='Include binary mask indicators to meta-model chunked input')
-    parser.add_argument('--include_nonmasked_loss',action='store_true')
-    #parser.add_argument('--include_nonmasked_loss',type=bool,default=False)
+    #parser.add_argument('--mask_indicators',action='store_true',help='Include binary mask indicators to meta-model chunked input')
+    parser.add_argument('--mask_indicators',type=bool, default=True,help='Include binary mask indicators to meta-model chunked input')
+    #parser.add_argument('--include_nonmasked_loss',action='store_true')
+    parser.add_argument('--include_nonmasked_loss',type=bool,default=False)
     # data
     parser.add_argument('--dataset_type',type=str,help='My dataset or external torch dataset. Values:myzoo or torchzoo',default='torchzoo')
     parser.add_argument('--data_dir',type=str,default='/rds/user/ed614/hpc-work/model_zoo_datasets/mnist_hyp_rand/tune_zoo_mnist_hyperparameter_10_random_seeds')
     parser.add_argument('--num_checkpoints',type=int,default=1)
     parser.add_argument('--num_networks',type=int,default=None)
-    parser.add_argument('--filter', action='store_true', help='Filter out high variance NN weights')
-    #parser.add_argument('--filter', type=bool, default=False, help='Filter out high variance NN weights')
+    #parser.add_argument('--filter', action='store_true', help='Filter out high variance NN weights')
+    parser.add_argument('--filter', type=bool, default=False, help='Filter out high variance NN weights')
     # augmentations
-    parser.add_argument('--augment', action='store_true', help='Use permutation augmentation')
-    #parser.add_argument('--augment', type=bool, default=True, help='Use permutation augmentation')
+    #parser.add_argument('--augment', action='store_true', help='Use permutation augmentation')
+    parser.add_argument('--augment', type=bool, default=True, help='Use permutation augmentation')
     parser.add_argument('--num_augment',type=int,default=1)
     #logging
-    parser.add_argument('--use_wandb', action='store_true', help='Use wandb')
-    #parser.add_argument('--use_wandb', type=bool, default=True, help='Use wandb')
+    #parser.add_argument('--use_wandb', action='store_true', help='Use wandb')
+    parser.add_argument('--use_wandb', type=bool, default=True, help='Use wandb')
     parser.add_argument('--wandb_log_name', type=str, default="meta-transformer-pretraining-fixed-mnist")
     parser.add_argument('--log_interval',type=int, default=50)
     parser.add_argument('--seed',type=int, help='PRNG key seed',default=42)
@@ -146,6 +149,9 @@ if __name__ == "__main__":
     # type of chunking
     parser.add_argument('--notlayerwise',action='store_true', help='turn off layerwise chunking')
     parser.add_argument('--layerind',action='store_true',help='indicators for layer type')
+    # for sweeps
+    parser.add_argument('--max_runtime', type=int, help='Max runtime in minutes', default=np.inf)
+    parser.add_argument('--save_chkp',type=bool,default=False)
     args = parser.parse_args()
     
     rng = random.PRNGKey(args.seed)
@@ -185,7 +191,7 @@ if __name__ == "__main__":
     
     # Load data
     if args.dataset_type == 'myzoo':
-        rng,subkey = random.split()
+        rng,subkey = random.split(rng)
         train_inputs, _, val_inputs, _, test_inputs, _ = load_data(subkey, args.data_dir, None,args.num_networks,args.num_checkpoints, is_filter=args.filter)
     else:
         train_inputs, _, val_inputs, _, test_inputs, _ = load_modelzoo(args.data_dir, None, epochs=list(range(0,51,50//args.num_checkpoints))[1:])
@@ -246,7 +252,10 @@ if __name__ == "__main__":
     else:
         loss_fcn = MWMLossMseNormalized(model.apply, non_masked=args.include_nonmasked_loss)
     #loss_fcn = MWMLossCosine(model.apply, non_masked=args.include_nonmasked_loss)
-    opt = optax.adamw(learning_rate=lr_schedule, weight_decay=args.wd/args.lr)
+    opt = optax.adamw(learning_rate=lr_schedule, weight_decay=args.wd/args.lr,
+                        b1=1-args.adam_b1,
+                        b2=1-args.adam_b2,
+                        eps=args.adam_eps)
     updater = Updater(opt=opt, evaluator=loss_fcn, model_init=model.init)
     
     rng, subkey = random.split(rng)
@@ -278,15 +287,20 @@ if __name__ == "__main__":
                     "num_layers":args.num_layers,
                     "augment":args.augment,
                     "num_networks":args.num_networks,
-                    "mask_prob":args.mask_prob},
+                    "mask_prob":args.mask_prob,
+                    "b1":args.adam_b1,
+                    "b2":args.adam_b2,
+                    "eps":args.adam_eps},
                     log_wandb = args.use_wandb,
-                    save_checkpoints=True,
+                    save_checkpoints=args.save_chkp,
                     save_interval=10,
                     log_interval=args.log_interval,
                     checkpoint_dir=os.path.join('checkpoints',args.exp,str(time.time())))
     logger.init(is_save_config=True)
 
     # Training loop
+    start = time.time()
+    max_runtime_reached = False
     for epoch in range(args.epochs):
         rng,subkey = random.split(rng)
         
@@ -311,6 +325,12 @@ if __name__ == "__main__":
             state, train_metrics = updater.train_step(state, (batch['masked_input'],batch['input'],batch['position'],batch['non_position'],batch['variances']))
             logger.log(state, train_metrics)
             train_all_loss.append(train_metrics['train/loss'].item())
+            
+            if time.time() - start > args.max_runtime * 60:
+                print("=======================================")
+                print("Max runtime reached. Stopping training.")
+                max_runtime_reached = True
+                break
         train_metrics = {'train/avg_loss':np.mean(train_all_loss)}
             
         # Validate every epoch
@@ -331,6 +351,9 @@ if __name__ == "__main__":
         val_metrics = {'val/avg_loss':np.mean(val_all_loss)}
             
         logger.log(state, train_metrics, val_metrics)
+        
+        if max_runtime_reached:
+            break
         
     # Evaluate reconstruction error on test set
     test_in, test_out, test_pos,non_pos = process_batch(subkey, test_inputs, mask_token=0,
