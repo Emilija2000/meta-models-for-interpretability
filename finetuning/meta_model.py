@@ -4,11 +4,11 @@ import jax.tree_util as tree_util
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 
-from model.meta_model import create_meta_model_classifier, MetaModel, Transformer
+from model.meta_model import create_meta_model_classifier, MetaModel, Transformer, MetaModelClassifier
 from model.meta_model import MetaModelConfig, MetaModelClassifierConfig
 from model_zoo_jax import model_restore, TrainState
 
-def get_meta_model_fcn(config:MetaModelConfig, num_classes:int, model_type:str) -> hk.Transformed:
+def get_meta_model_fcn(config:MetaModelConfig, num_classes:int, model_type:str,compress_size:int=1200) -> hk.Transformed:
     if model_type=="classifier":
         # meta model classifier, with ViT inspired architecture, takes only output[:,0,:]
         classifier_config = MetaModelClassifierConfig(
@@ -20,6 +20,27 @@ def get_meta_model_fcn(config:MetaModelConfig, num_classes:int, model_type:str) 
             num_classes=num_classes
             )
         model = create_meta_model_classifier(classifier_config)
+    elif model_type=="classifier_compress":
+        @hk.transform
+        def model(input_batch: dict,
+                is_training: bool = True) -> ArrayLike:
+            net = MetaModelClassifier(
+                model_size=config.model_size,
+                num_classes=compress_size,
+                use_embedding=config.use_embedding,
+                transformer=Transformer(
+                    num_heads=config.num_heads,
+                    num_layers=config.num_layers,
+                    key_size=config.key_size,
+                    dropout_rate=config.dropout_rate,
+                    widening_factor=1000/512,
+                    activation='leakyrelu'
+                ))
+            linear = hk.Linear(num_classes)
+            x = net(input_batch, is_training=is_training)
+            x = hk.Flatten()(x)
+            y = linear(x)
+            return y
     elif model_type=="plus_linear":
         # take the whole meta model architecture and add another layer on top
         @hk.transform

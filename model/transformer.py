@@ -46,8 +46,9 @@ class Transformer(hk.Module):
   num_layers: int
   key_size: int
   dropout_rate: float
-  widening_factor: int = 4
+  widening_factor: Optional[int] = 4
   name: Optional[str] = None
+  activation: Optional[str] = 'gelu'
 
   def __call__(
       self,
@@ -75,10 +76,14 @@ class Transformer(hk.Module):
       h_attn = hk.dropout(hk.next_rng_key(), dropout_rate, h_attn)
       h = h + h_attn
 
+      if self.activation == 'gelu':
+          act = jax.nn.gelu
+      else:
+          act = jax.nn.leaky_relu
       # Then the dense block.
       dense_block = hk.Sequential([
-          hk.Linear(self.widening_factor * model_size, w_init=initializer),
-          jax.nn.gelu,
+          hk.Linear(int(self.widening_factor * model_size), w_init=initializer),
+          act,
           hk.Linear(model_size, w_init=initializer),
       ])
       h_norm = layer_norm(h)
@@ -121,8 +126,9 @@ class TransformerWithAux(Transformer):
 
       # Then the dense block.
       dense_block = hk.Sequential([
-          hk.Linear(self.widening_factor * model_size, w_init=initializer),
-          jax.nn.gelu,
+          hk.Linear(int(self.widening_factor * model_size), w_init=initializer),
+          #jax.nn.gelu,
+          jax.nn.leakyrelu,
           hk.Linear(model_size, w_init=initializer),
       ])
       h_norm = layer_norm(h)
