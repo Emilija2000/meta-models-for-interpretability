@@ -354,8 +354,8 @@ if __name__ == "__main__":
             
         logger.log(state, train_metrics, val_metrics)
         
-        if val_metrics['val/loss'] <best_loss:
-            best_loss = val_metrics['val/loss']
+        if val_metrics['val/avg_loss'] <best_loss:
+            best_loss = val_metrics['val/avg_loss']
             best = state
         
         if max_runtime_reached:
