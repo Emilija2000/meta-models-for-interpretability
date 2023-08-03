@@ -373,7 +373,7 @@ if __name__ == "__main__":
                                                     layerind=args.layerind)
     test_iterator = data_iterator(test_in, test_out, test_pos,non_pos, batchsize=args.bs,skip_last=True)
     predictions = None
-    for masked_ins,target,positions in test_iterator:
+    for masked_ins,target,positions,_,_ in test_iterator:
         
         predicted = model.apply(state.params, subkey, masked_ins, False)
         if predictions is None:
