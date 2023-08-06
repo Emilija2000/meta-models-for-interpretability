@@ -112,9 +112,9 @@ if __name__ == "__main__":
     parser.add_argument('--dropout',type=float,help='Meta-transformer dropout', default=0.0)
     parser.add_argument('--bs', type=int, help='Batch size', default=32)
     parser.add_argument('--epochs', type=int, help='Number of epochs', default=6000)
-    parser.add_argument('--adam_b1', type=float, help='Learning rate', default=0.1)
-    parser.add_argument('--adam_b2', type=float, help='Weight decay', default=0.001)
-    parser.add_argument('--adam_eps', type=float, help='Weight decay', default=1e-8)
+    #parser.add_argument('--adam_b1', type=float, help='Learning rate', default=0.1)
+    #parser.add_argument('--adam_b2', type=float, help='Weight decay', default=0.001)
+    #parser.add_argument('--adam_eps', type=float, help='Weight decay', default=1e-8)
     # meta-model
     parser.add_argument('--model_size',type=int,help='MetaModel model_size parameter',default=4*32)
     parser.add_argument('--num_layers',type=int,help='num of transformer layers',default=12)
@@ -253,10 +253,7 @@ if __name__ == "__main__":
     else:
         loss_fcn = MWMLossMseNormalized(model.apply, non_masked=args.include_nonmasked_loss)
     #loss_fcn = MWMLossCosine(model.apply, non_masked=args.include_nonmasked_loss)
-    opt = optax.adamw(learning_rate=lr_schedule, weight_decay=args.wd,
-                        b1=1-args.adam_b1,
-                        b2=1-args.adam_b2,
-                        eps=args.adam_eps)
+    opt = optax.adamw(learning_rate=lr_schedule, weight_decay=args.wd)
     updater = Updater(opt=opt, evaluator=loss_fcn, model_init=model.init)
     
     rng, subkey = random.split(rng)
