@@ -54,8 +54,8 @@ class MWMLossMSE(LossFcn):
     def masked_loss_fn(self,predictions, targets, positions):
         diff = jnp.square(predictions-targets)
         diff = jnp.multiply(positions, diff) #shape [batch_size, num_chunks, chunk_size]
-        #res = jnp.sum(diff)/(jnp.sum(positions)+0.0001)
-        res = jnp.sum(diff)/(jnp.sum(positions[:,:,0]))*positions.shape[0]*positions.shape[1]
+        res = jnp.sum(diff)/(jnp.sum(positions))
+        #res = jnp.sum(diff)/(jnp.sum(positions[:,:,0]))/positions.shape[-1]#*positions.shape[0]*positions.shape[1]
         return res
     
     @functools.partial(jit, static_argnums=(0))
@@ -96,8 +96,8 @@ class MWMLossMseNormalized(LossFcn):
         diff = jnp.reshape(diff, (diff.shape[0],1))
         varinv = 1.0/variances
         res = jnp.dot(diff.T, varinv) / jnp.sum(varinv) * diff.shape[0]
-        #res = jnp.sum(res)/(jnp.sum(positions))
-        res = jnp.sum(res)/(jnp.sum(positions[:,:,0]))*positions.shape[0]*positions.shape[1]
+        res = jnp.sum(res)/(jnp.sum(positions))
+        #res = jnp.sum(res)/(jnp.sum(positions[:,:,0]))/positions.shape[-1]#*positions.shape[0]*positions.shape[1]
         return res
     
     @functools.partial(jit, static_argnums=(0))
