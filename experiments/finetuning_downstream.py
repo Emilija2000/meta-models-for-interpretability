@@ -122,7 +122,7 @@ if __name__ == "__main__":
     else:
         evaluator = CrossEntropyLoss(model.apply, args.num_classes)
     
-    opt = optax.adamw(learning_rate=args.lr, weight_decay=args.wd/args.lr)
+    opt = optax.adamw(learning_rate=args.lr, weight_decay=args.wd)
     updater = Updater(opt=opt, evaluator=evaluator, model_init=model.init)
     
     rng, subkey = random.split(rng)
@@ -165,7 +165,7 @@ if __name__ == "__main__":
                     checkpoint_dir=checkpoints_dir)
     logger.init(is_save_config=True)
 
-    best = None
+    best = state
     best_loss = 1000000.0
     
     # Training loop
@@ -229,7 +229,7 @@ if __name__ == "__main__":
         logger.log(state, train_metrics, val_metrics)
         
     logger.save_checkpoint(best,train_metrics,val_metrics)
-        
+      
     ## TEST
     images, _, _,_ = process_batch(subkey, test_inputs, 0, 
                                         mask_prob=0,

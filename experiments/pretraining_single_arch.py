@@ -122,37 +122,39 @@ if __name__ == "__main__":
     parser.add_argument('--chunk_size',type=int,help='meta model chunk size',default=64)
     parser.add_argument('--mask_prob',type=float,default=0.2)
     parser.add_argument('--mask_single',action='store_true',help='Mask each weight individually')
-    parser.add_argument('--mask_indicators',action='store_true',help='Include binary mask indicators to meta-model chunked input')
-    #parser.add_argument('--mask_indicators',type=bool, default=True,help='Include binary mask indicators to meta-model chunked input')
-    parser.add_argument('--include_nonmasked_loss',action='store_true')
-    #parser.add_argument('--include_nonmasked_loss',type=bool,default=False)
+    #parser.add_argument('--mask_indicators',action='store_true',help='Include binary mask indicators to meta-model chunked input')
+    parser.add_argument('--mask_indicators',type=bool, default=True,help='Include binary mask indicators to meta-model chunked input')
+    #parser.add_argument('--include_nonmasked_loss',action='store_true')
+    parser.add_argument('--include_nonmasked_loss',type=bool,default=False)
     # data
     parser.add_argument('--dataset_type',type=str,help='My dataset or external torch dataset. Values:myzoo or torchzoo',default='torchzoo')
     parser.add_argument('--data_dir',type=str,default='/rds/user/ed614/hpc-work/model_zoo_datasets/mnist_hyp_rand/tune_zoo_mnist_hyperparameter_10_random_seeds')
     parser.add_argument('--num_checkpoints',type=int,default=1)
     parser.add_argument('--num_networks',type=int,default=None)
-    parser.add_argument('--filter', action='store_true', help='Filter out high variance NN weights')
-    #parser.add_argument('--filter', type=bool, default=False, help='Filter out high variance NN weights')
+    #parser.add_argument('--filter', action='store_true', help='Filter out high variance NN weights')
+    parser.add_argument('--filter', type=bool, default=False, help='Filter out high variance NN weights')
     # augmentations
-    parser.add_argument('--augment', action='store_true', help='Use permutation augmentation')
-    #parser.add_argument('--augment', type=bool, default=True, help='Use permutation augmentation')
+    #parser.add_argument('--augment', action='store_true', help='Use permutation augmentation')
+    parser.add_argument('--augment', type=int, default=1, help='Use permutation augmentation')
     parser.add_argument('--num_augment',type=int,default=1)
     #logging
-    parser.add_argument('--use_wandb', action='store_true', help='Use wandb')
-    #parser.add_argument('--use_wandb', type=bool, default=True, help='Use wandb')
-    parser.add_argument('--wandb_log_name', type=str, default="meta-transformer-pretraining-fixed-mnist")
+    #parser.add_argument('--use_wandb', action='store_true', help='Use wandb')
+    parser.add_argument('--use_wandb', type=bool, default=True, help='Use wandb')
+    parser.add_argument('--wandb_log_name', type=str, default="meta-transformer-pretraining-mnist")
     parser.add_argument('--log_interval',type=int, default=50)
     parser.add_argument('--seed',type=int, help='PRNG key seed',default=42)
     parser.add_argument('--exp', type=str, default="sweep")
     # continued training
     parser.add_argument('--pretrained_path',type=str,default=None)
     # type of chunking
-    parser.add_argument('--notlayerwise',action='store_true', help='turn off layerwise chunking')
-    parser.add_argument('--layerind',action='store_true',help='indicators for layer type')
+    #parser.add_argument('--notlayerwise',action='store_true', help='turn off layerwise chunking')
+    parser.add_argument('--notlayerwise',type=int,default=0, help='turn off layerwise chunking')
+    #parser.add_argument('--layerind',action='store_true',help='indicators for layer type')
+    parser.add_argument('--layerind',type=int, default=0,help='indicators for layer type')
     # for sweeps
     parser.add_argument('--max_runtime', type=int, help='Max runtime in minutes', default=np.inf)
-    parser.add_argument('--save_chkp',action='store_true')
-    #parser.add_argument('--save_chkp',type=bool,default=False)
+    #parser.add_argument('--save_chkp',action='store_true')
+    parser.add_argument('--save_chkp',type=int,default=0)
     args = parser.parse_args()
     
     rng = random.PRNGKey(args.seed)
@@ -285,10 +287,8 @@ if __name__ == "__main__":
                     "num_layers":args.num_layers,
                     "augment":args.augment,
                     "num_networks":args.num_networks,
-                    "mask_prob":args.mask_prob,
-                    "b1":args.adam_b1,
-                    "b2":args.adam_b2,
-                    "eps":args.adam_eps},
+                    "mask_prob":args.mask_prob
+                    },
                     log_wandb = args.use_wandb,
                     save_checkpoints=args.save_chkp,
                     save_interval=10,
@@ -336,7 +336,8 @@ if __name__ == "__main__":
         # Validate every epoch
         rng, subkey = random.split(rng)
         masked_ins, masked_labels, positions,non_masked_positions = process_batch(subkey, val_inputs, MASK_TOKEN, 
-                                                      mask_prob=args.mask_prob,
+                                                      #mask_prob=args.mask_prob,
+                                                      mask_prob=0.2,
                                                       chunk_size=args.chunk_size, 
                                                       mask_individual=args.mask_single, 
                                                       mask_indicators=args.mask_indicators,
@@ -363,7 +364,7 @@ if __name__ == "__main__":
         
     # Evaluate reconstruction error on test set
     test_in, test_out, test_pos,non_pos = process_batch(subkey, test_inputs, mask_token=0,
-                                                    mask_prob=args.mask_prob, 
+                                                    mask_prob=0.2, 
                                                     chunk_size=args.chunk_size, 
                                                     mask_individual=args.mask_single, 
                                                     mask_indicators=args.mask_indicators,
@@ -373,7 +374,7 @@ if __name__ == "__main__":
     predictions = None
     for masked_ins,target,positions,_,_ in test_iterator:
         
-        predicted = model.apply(state.params, subkey, masked_ins, False)
+        predicted = model.apply(state.params, subkey, masked_ins['masked_input'], False)
         if predictions is None:
             predictions = predicted
         else:
